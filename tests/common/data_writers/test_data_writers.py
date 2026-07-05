@@ -1,9 +1,13 @@
 import io
-import pytest
 import time
+from pathlib import Path
 from typing import Iterator, Any
 
+import fsspec
+import pytest
+
 from dlt.common import pendulum, json
+from dlt.common.data_writers.remote import RemoteBufferedWriter
 from dlt.common.data_writers.exceptions import DataWriterNotFound, SpecLookupFailed
 from dlt.common.metrics import DataWriterMetrics
 from dlt.common.typing import AnyFun
@@ -80,6 +84,33 @@ def test_simple_insert_writer(insert_writer: _StringIOWriter) -> None:
     assert '","'.join(rows[0].keys()) in lines[0]
     assert lines[1] == "VALUES"
     assert len(lines) == 4
+
+
+def test_remote_buffered_writer_writes_reference(tmp_path: Path) -> None:
+    local_path = tmp_path / "local"
+    remote_path = tmp_path / "remote"
+    local_path.mkdir()
+
+    fs_client = fsspec.filesystem("file")
+    writer = RemoteBufferedWriter(
+        DataWriter.writer_spec_from_file_format("typed-jsonl", "object"),
+        str(local_path / "items.%s.0"),
+        fs_client=fs_client,
+        make_remote_path=lambda file_name: str(remote_path / file_name),
+        make_remote_url=lambda path: f"file://{path}",
+    )
+
+    writer.write_data_item([{"id": 1}], {"id": {"name": "id", "data_type": "bigint"}})
+    writer.close()
+
+    metrics = writer.closed_files[0]
+    assert metrics.file_path.endswith(".reference")
+    with open(metrics.file_path, "r", encoding="utf-8") as f:
+        remote_url = f.read()
+    assert remote_url.startswith("file://")
+    assert fs_client.exists(remote_url[7:])
+    assert metrics.items_count == 1
+    assert metrics.file_size > 0
 
 
 def test_simple_jsonl_writer(jsonl_writer: _BytesIOWriter) -> None:

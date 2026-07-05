@@ -259,7 +259,10 @@ class Load(Runnable[Executor], WithStepInfo[LoadMetrics, LoadInfo]):
         # only start a thread if this job is runnable
         if isinstance(job, RunnableLoadJob):
             # submit to pool
-            self.pool.submit(Load.w_run_job, *(id(self), job, is_staging_destination_job, use_staging_dataset, schema))  # type: ignore
+            self.pool.submit(
+                Load.w_run_job,
+                *(id(self), job, is_staging_destination_job, use_staging_dataset, schema),
+            )  # type: ignore
         else:
             # sanity check: otherwise a job in an actionable state is expected
             assert job.state() in ("completed", "failed", "retry")
@@ -645,6 +648,7 @@ class Load(Runnable[Executor], WithStepInfo[LoadMetrics, LoadInfo]):
         package_state = self.load_storage.normalized_packages.get_load_package_state(load_id)
         dropped_tables = package_state.get("dropped_tables", [])
         truncated_tables = package_state.get("truncated_tables", [])
+        direct_spool_tables = set(package_state.get("direct_spool_tables", []))
 
         # initialize analytical storage ie. create dataset required by passed schema
         with self.get_destination_client(schema) as job_client:
@@ -680,7 +684,10 @@ class Load(Runnable[Executor], WithStepInfo[LoadMetrics, LoadInfo]):
                             new_jobs,
                             expected_update,
                             # should_truncate_staging,
-                            job_client.should_truncate_table_before_load_on_staging_destination,
+                            lambda table_name: table_name not in direct_spool_tables
+                            and job_client.should_truncate_table_before_load_on_staging_destination(
+                                table_name
+                            ),
                             job_client.should_load_data_to_staging_dataset_on_staging_destination,
                             # should we drop tables also on staging destination
                             job_client.should_drop_table_on_staging_destination,

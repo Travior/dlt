@@ -6,7 +6,7 @@ from dlt.common.configuration.container import Container
 from dlt.common.destination import DestinationCapabilitiesContext
 from dlt.common.schema.schema import Schema
 from dlt.common.schema.utils import new_table
-from dlt.common.storages import NormalizeStorage, ParsedLoadJobFileName
+from dlt.common.storages import NormalizeStorage, PackageStorage, ParsedLoadJobFileName
 
 from dlt.extract.extract import ExtractStorage
 from dlt.normalize import Normalize
@@ -107,3 +107,26 @@ def test_normalize_empty_arrow_input_parquet_output(
     assert all(pyarrow.parquet.read_table(storage.make_full_path(f)).num_rows == 0 for f in files)
     step_info = raw_normalize.get_step_info(MockPipeline("arrow_parquet_pipeline", True))  # type: ignore[abstract]
     assert step_info.metrics[load_id][0]["table_metrics"]["items"].items_count == 0
+
+
+def test_normalize_reference_job_pass_through(raw_normalize: Normalize) -> None:
+    schema = _items_schema(write_disposition="append")
+    extractor = ExtractStorage(raw_normalize.normalize_storage.config)
+    load_id = extractor.create_load_package(schema)
+    file_name = "items.refid.0.reference"
+    extractor.new_packages.storage.save(
+        extractor.new_packages.get_job_file_path(
+            load_id, PackageStorage.NEW_JOBS_FOLDER, file_name
+        ),
+        "file:///tmp/items.refid.0.parquet",
+    )
+    extractor.commit_new_load_package(load_id, schema)
+
+    normalize_pending(raw_normalize)
+
+    jobs = raw_normalize.load_storage.normalized_packages.list_new_jobs(load_id)
+    assert jobs == [f"{load_id}/new_jobs/{file_name}"]
+    storage = raw_normalize.load_storage.normalized_packages.storage
+    assert storage.load(jobs[0]) == "file:///tmp/items.refid.0.parquet"
+    step_info = raw_normalize.get_step_info(MockPipeline("reference_pipeline", True))  # type: ignore[abstract]
+    assert list(step_info.metrics[load_id][0]["job_metrics"]) == ["items.refid.reference"]

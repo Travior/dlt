@@ -1312,6 +1312,34 @@ def test_init_client_initial_truncate_tables_from_package_state() -> None:
     assert truncate_calls == [{"event_bot"}]
 
 
+def test_init_client_skips_direct_spool_tables_on_staging_truncate() -> None:
+    load = setup_loader(
+        client_config=DummyClientConfiguration(
+            truncate_tables_on_staging_destination_before_load=True
+        ),
+        filesystem_staging=True,
+    )
+    load_id, schema = prepare_load_package(load.load_storage, NORMALIZED_FILES)
+    packages = load.load_storage.normalized_packages
+    state = packages.get_load_package_state(load_id)
+    state["direct_spool_tables"] = ["event_user"]
+    packages.save_load_package_state(load_id, state)
+
+    init_calls = []
+
+    def mock_init_client(*args, **kwargs):  # type: ignore[no-untyped-def]
+        init_calls.append(args)
+        return {}
+
+    new_jobs = [ParsedLoadJobFileName.parse(NORMALIZED_FILES[0])]
+    with patch("dlt.load.load.init_client", side_effect=mock_init_client):
+        load.initialize_package(load_id, schema, new_jobs)
+
+    staging_should_truncate = init_calls[1][4]
+    assert staging_should_truncate("event_user") is False
+    assert staging_should_truncate("event_bot") is True
+
+
 def test_init_client_staging_ddl_includes_jobless_tables() -> None:
     """Issue #2862: staging DDL includes ALL staging-eligible data tables, not just those with jobs."""
     load = setup_loader()

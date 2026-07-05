@@ -1,7 +1,8 @@
 import os
-from typing import Dict, List
+from typing import Dict, List, Set
 
 from dlt.common.data_writers import TDataItemFormat, DataWriter, FileWriterSpec
+from dlt.common.data_writers.remote import RemoteBufferedWriter
 from dlt.common.metrics import DataWriterMetrics
 from dlt.common.schema import Schema
 from dlt.common.storages import (
@@ -15,6 +16,7 @@ from dlt.common.storages import (
 )
 from dlt.common.storages.exceptions import LoadPackageNotFound
 from dlt.common.utils import uniq_id
+from dlt.extract.staging_spool import StagingSpool
 
 
 class ExtractorItemStorage(DataItemStorage):
@@ -29,6 +31,48 @@ class ExtractorItemStorage(DataItemStorage):
             load_id, PackageStorage.NEW_JOBS_FOLDER, file_name
         )
         return self.package_storage.storage.make_full_path(file_path)
+
+
+class DirectSpoolExtractorItemStorage(ExtractorItemStorage):
+    def __init__(self, package_storage: PackageStorage, writer_spec: FileWriterSpec) -> None:
+        super().__init__(package_storage, writer_spec)
+        self._staging_spools: Dict[str, StagingSpool] = {}
+        self._direct_spool_tables: Dict[str, Set[str]] = {}
+
+    def set_staging_spool(self, load_id: str, staging_spool: StagingSpool) -> None:
+        self._staging_spools[load_id] = staging_spool
+
+    def has_staging_spool(self, load_id: str) -> bool:
+        return load_id in self._staging_spools
+
+    def set_direct_spool_table(self, load_id: str, schema_name: str, table_name: str) -> None:
+        self._direct_spool_tables.setdefault(load_id, set()).add(table_name)
+
+    def direct_spool_tables(self, load_id: str) -> Set[str]:
+        return set(self._direct_spool_tables.get(load_id) or set())
+
+    def _get_writer(self, load_id: str, schema_name: str, table_name: str):  # type: ignore[no-untyped-def]
+        writer_id, writer = self.get_active_writer(load_id, schema_name, table_name)
+        if writer:
+            return writer
+        if table_name not in self._direct_spool_tables.get(load_id, set()):
+            return super()._get_writer(load_id, schema_name, table_name)
+
+        kwargs = {}
+        if self.writer_spec.file_max_items:
+            kwargs["file_max_items"] = self.writer_spec.file_max_items
+        path = self._get_data_item_path_template(load_id, schema_name, table_name)
+        staging_spool = self._staging_spools[load_id]
+        writer = RemoteBufferedWriter(
+            self.writer_spec,
+            path,
+            fs_client=staging_spool.fs_client,
+            make_remote_path=staging_spool.make_remote_path,
+            make_remote_url=staging_spool.make_remote_url,
+            **kwargs,
+        )
+        self.buffered_writers[writer_id] = writer
+        return writer
 
 
 class ExtractStorage(NormalizeStorage):
@@ -47,7 +91,7 @@ class ExtractStorage(NormalizeStorage):
             "object": ExtractorItemStorage(
                 self.new_packages, DataWriter.writer_spec_from_file_format("typed-jsonl", "object")
             ),
-            "arrow": ExtractorItemStorage(
+            "arrow": DirectSpoolExtractorItemStorage(
                 self.new_packages, DataWriter.writer_spec_from_file_format("parquet", "arrow")
             ),
             "model": ExtractorItemStorage(
@@ -79,6 +123,16 @@ class ExtractStorage(NormalizeStorage):
     def close_writers(self, load_id: str, skip_flush: bool = False) -> None:
         for storage in self.item_storages.values():
             storage.close_writers(load_id, skip_flush=skip_flush)
+
+    def set_staging_spool(self, load_id: str, staging_spool: StagingSpool) -> None:
+        storage = self.item_storages["arrow"]
+        assert isinstance(storage, DirectSpoolExtractorItemStorage)
+        storage.set_staging_spool(load_id, staging_spool)
+
+    def direct_spool_tables(self, load_id: str) -> Set[str]:
+        storage = self.item_storages["arrow"]
+        assert isinstance(storage, DirectSpoolExtractorItemStorage)
+        return storage.direct_spool_tables(load_id)
 
     def closed_files(self, load_id: str) -> List[DataWriterMetrics]:
         files = []

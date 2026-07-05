@@ -497,6 +497,19 @@ class Pipeline(SupportsPipeline):
                                 schema=last_schema,
                             )
 
+                    if extract_step.config.spool_to_staging and self._staging:
+                        try:
+                            _, staging_client = self._get_destination_clients(source.schema)
+                            extract_step.set_staging_client(staging_client)
+                        except Exception as exc:
+                            extract_step.set_staging_client(None)
+                            logger.warning(
+                                "Direct spooling to staging could not resolve staging credentials and"
+                                f" local spooling will be used: {exc}"
+                            )
+                    else:
+                        extract_step.set_staging_client(None)
+
                     self._extract_source(
                         extract_step,
                         source,

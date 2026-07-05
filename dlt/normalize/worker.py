@@ -1,3 +1,4 @@
+import os
 from typing import List, Dict, NamedTuple, Sequence, Set, Type
 
 from dlt.common import logger
@@ -17,10 +18,12 @@ from dlt.common.typing import TLoaderFileFormat
 from dlt.common.utils import chunks
 from dlt.common.schema.typing import TStoredSchema, TTableSchema
 from dlt.common.storages import (
+    FileStorage,
     NormalizeStorage,
     LoadStorage,
     LoadStorageConfiguration,
     NormalizeStorageConfiguration,
+    PackageStorage,
     ParsedLoadJobFileName,
 )
 from dlt.common.schema import TSchemaUpdate, Schema
@@ -235,6 +238,7 @@ def w_normalize_files(
         parsed_file_name: ParsedLoadJobFileName = None
         try:
             root_tables: Set[str] = set()
+            reference_metrics: List[DataWriterMetrics] = []
             for extracted_items_file in extracted_items_files:
                 parsed_file_name = ParsedLoadJobFileName.parse(extracted_items_file)
                 # normalize table name in case the normalization changed
@@ -250,6 +254,24 @@ def w_normalize_files(
                 root_table = prepare_load_table(
                     stored_schema["tables"], root_table, destination_caps
                 )
+                if parsed_file_name.file_format == "reference":
+                    source_path = normalize_storage.extracted_packages.storage.make_full_path(
+                        extracted_items_file
+                    )
+                    dest_file = load_storage.new_packages.get_job_file_path(
+                        load_id,
+                        PackageStorage.NEW_JOBS_FOLDER,
+                        os.path.basename(extracted_items_file),
+                    )
+                    dest_path = load_storage.new_packages.storage.make_full_path(dest_file)
+                    FileStorage.link_hard_with_fallback(source_path, dest_path)
+                    reference_metrics.append(
+                        DataWriterMetrics(dest_path, 0, os.path.getsize(dest_path), 0, 0)
+                    )
+                    collector.update(root_table_name, 0)
+                    collector.update("Files", 1)
+                    logger.debug(f"Passed through reference job {extracted_items_file}")
+                    continue
                 normalizer = _get_items_normalizer(
                     parsed_file_name,
                     root_table,
@@ -271,6 +293,7 @@ def w_normalize_files(
             raise NormalizeJobFailed(load_id, job_id, str(exc), writer_metrics) from exc
         else:
             writer_metrics = _gather_metrics_and_close(parsed_file_name, in_exception=False)
+            writer_metrics.extend(reference_metrics)
         finally:
             for normalizer in item_normalizers.values():
                 normalizer.close()

@@ -474,8 +474,26 @@ class ArrowExtractor(Extractor):
                 for item in items
             ]
 
+        if self._is_direct_spool_eligible(table_name):
+            self.item_storage.set_direct_spool_table(  # type: ignore[attr-defined]
+                self.load_id, self.schema.name, table_name
+            )
+
         # write items one by one
         super()._write_item(table_name, resource_name, items, columns)
+
+    def _is_direct_spool_eligible(self, table_name: str) -> bool:
+        if self._normalize_config.add_dlt_id:
+            return False
+        if not getattr(self.item_storage, "has_staging_spool", lambda _: False)(self.load_id):
+            return False
+        table = self.schema.tables.get(table_name)
+        if not table:
+            return False
+        write_disposition = table.get("write_disposition")
+        if isinstance(write_disposition, dict):
+            write_disposition = write_disposition.get("disposition")
+        return write_disposition in ("append", "replace")
 
     def _compute_tables(
         self, resource: DltResource, items: TDataItems, meta: Any

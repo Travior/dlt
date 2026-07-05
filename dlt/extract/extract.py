@@ -2,13 +2,15 @@ import contextlib
 from collections.abc import Sequence as C_Sequence
 from copy import copy
 import itertools
+from typing import ClassVar
 from typing import Iterator, List, Dict, Any, Optional, cast
 import yaml
 
 from dlt.common import logger
+from dlt.common.configuration import configspec, with_config
 from dlt.common.configuration.container import Container
 from dlt.common.configuration.resolve import inject_section
-from dlt.common.configuration.specs import ConfigSectionContext, known_sections
+from dlt.common.configuration.specs import BaseConfiguration, ConfigSectionContext, known_sections
 from dlt.common.data_writers.writers import EMPTY_DATA_WRITER_METRICS, TDataItemFormat
 from dlt.common.pipeline import (
     ExtractDataInfo,
@@ -60,6 +62,7 @@ from dlt.extract.reference import SourceReference, SourceFactory
 from dlt.extract.resource import DltResource
 from dlt.extract.storage import ExtractStorage
 from dlt.extract.extractors import ObjectExtractor, ArrowExtractor, Extractor, ModelExtractor
+from dlt.extract.staging_spool import StagingSpool
 from dlt.extract.state import reset_resource_state
 from dlt.extract.utils import get_data_item_format, make_schema_with_default_name
 
@@ -301,26 +304,40 @@ def get_fresh_write_disposition(
 
 
 class Extract(WithStepInfo[ExtractMetrics, ExtractInfo]):
+    @configspec
+    class ExtractConfiguration(BaseConfiguration):
+        spool_to_staging: bool = False
+
+        __section__: ClassVar[str] = known_sections.EXTRACT
+
     original_data: Any
     """Original data from which the extracted DltSource was created. Will be used to describe in extract info"""
 
     _last_extractors: Dict[TDataItemFormat, Extractor] = None
     """Most recently used extractors"""
 
+    @with_config(spec=ExtractConfiguration, sections=(known_sections.EXTRACT,))
     def __init__(
         self,
         schema_storage: SchemaStorage,
         normalize_storage_config: NormalizeStorageConfiguration,
         collector: Collector = NULL_COLLECTOR,
         original_data: Any = None,
+        config: ExtractConfiguration = None,
     ) -> None:
         """optionally saves originally extracted `original_data` to generate extract info"""
         self.collector = collector
+        self.config = config or Extract.ExtractConfiguration()
         self.schema_storage = schema_storage
         self.extract_storage = ExtractStorage(normalize_storage_config)
+        self.staging_client: Any = None
+        self.staging_spool: Optional[StagingSpool] = None
         # TODO: this should be passed together with DltSource to extract()
         self.original_data: Any = original_data
         super().__init__()
+
+    def set_staging_client(self, staging_client: Any) -> None:
+        self.staging_client = staging_client
 
     def _compute_metrics(self, load_id: str, source: DltSource) -> ExtractMetrics:
         # map by job id
@@ -537,6 +554,9 @@ class Extract(WithStepInfo[ExtractMetrics, ExtractInfo]):
         except Exception:
             # kill writers without flushing the content
             self.extract_storage.close_writers(load_id, skip_flush=True)
+            if self.staging_spool:
+                with contextlib.suppress(Exception):
+                    self.staging_spool.cleanup_load_prefix()
             raise
         else:
             self.extract_storage.close_writers(load_id)
@@ -584,6 +604,23 @@ class Extract(WithStepInfo[ExtractMetrics, ExtractInfo]):
                 if load_package_state_update:
                     load_package.state.update(load_package_state_update)
 
+                self.staging_spool = None
+                if self.config.spool_to_staging and self.staging_client:
+                    try:
+                        self.staging_spool = StagingSpool(
+                            self.staging_client,
+                            source.schema.name,
+                            load_id,
+                            load_package.state["created_at"],
+                        )
+                        self.extract_storage.set_staging_spool(load_id, self.staging_spool)
+                    except Exception as exc:
+                        self.staging_spool = None
+                        logger.warning(
+                            "Direct spooling to staging could not be initialized and local"
+                            f" spooling will be used: {exc}"
+                        )
+
                 # reset resource states, the `extracted` list contains all the explicit resources and all their parents
                 for resource in source.resources.extracted:
                     if resource.write_disposition == "replace":
@@ -595,6 +632,8 @@ class Extract(WithStepInfo[ExtractMetrics, ExtractInfo]):
                     max_parallel_items=max_parallel_items,
                     workers=workers,
                 )
+                if direct_spool_tables := self.extract_storage.direct_spool_tables(load_id):
+                    load_package.state["direct_spool_tables"] = sorted(direct_spool_tables)
                 commit_load_package_state()
         return load_id
 
