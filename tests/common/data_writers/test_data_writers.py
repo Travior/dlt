@@ -1,9 +1,10 @@
 import io
+import os
+import shutil
 import time
 from pathlib import Path
-from typing import Iterator, Any
+from typing import Iterator, Any, List, Tuple
 
-import fsspec
 import pytest
 
 from dlt.common import pendulum, json
@@ -86,20 +87,35 @@ def test_simple_insert_writer(insert_writer: _StringIOWriter) -> None:
     assert len(lines) == 4
 
 
+def _make_remote_writer(
+    local_path: Path, remote_path: Path, uploads: List[Tuple[str, str, str, str]], **kwargs: Any
+) -> RemoteBufferedWriter:
+    def submit_upload(local: str, remote: str, url: str, reference: str) -> None:
+        # synchronous stand-in for StagingSpool upload pool
+        uploads.append((local, remote, url, reference))
+        shutil.copy(local, remote)
+        with open(reference, "w", encoding="utf-8") as f:
+            f.write(url)
+        os.remove(local)
+
+    return RemoteBufferedWriter(
+        DataWriter.writer_spec_from_file_format("typed-jsonl", "object"),
+        str(local_path / "items.%s.0"),
+        submit_upload=submit_upload,
+        make_remote_path=lambda file_name: str(remote_path / file_name),
+        make_remote_url=lambda path: f"file://{path}",
+        **kwargs,
+    )
+
+
 def test_remote_buffered_writer_writes_reference(tmp_path: Path) -> None:
     local_path = tmp_path / "local"
     remote_path = tmp_path / "remote"
     local_path.mkdir()
+    remote_path.mkdir()
 
-    fs_client = fsspec.filesystem("file")
-    writer = RemoteBufferedWriter(
-        DataWriter.writer_spec_from_file_format("typed-jsonl", "object"),
-        str(local_path / "items.%s.0"),
-        fs_client=fs_client,
-        make_remote_path=lambda file_name: str(remote_path / file_name),
-        make_remote_url=lambda path: f"file://{path}",
-    )
-
+    uploads: List[Tuple[str, str, str, str]] = []
+    writer = _make_remote_writer(local_path, remote_path, uploads)
     writer.write_data_item([{"id": 1}], {"id": {"name": "id", "data_type": "bigint"}})
     writer.close()
 
@@ -108,9 +124,50 @@ def test_remote_buffered_writer_writes_reference(tmp_path: Path) -> None:
     with open(metrics.file_path, "r", encoding="utf-8") as f:
         remote_url = f.read()
     assert remote_url.startswith("file://")
-    assert fs_client.exists(remote_url[7:])
+    assert os.path.isfile(remote_url[7:])
     assert metrics.items_count == 1
     assert metrics.file_size > 0
+    # local data file was removed after upload
+    local_file, _, _, _ = uploads[0]
+    assert not os.path.exists(local_file)
+
+
+def test_remote_buffered_writer_uploads_on_rotation(tmp_path: Path) -> None:
+    local_path = tmp_path / "local"
+    remote_path = tmp_path / "remote"
+    local_path.mkdir()
+    remote_path.mkdir()
+
+    uploads: List[Tuple[str, str, str, str]] = []
+    writer = _make_remote_writer(local_path, remote_path, uploads, file_max_items=1)
+    columns = {"id": {"name": "id", "data_type": "bigint"}}
+    for idx in range(3):
+        writer.write_data_item([{"id": idx}], columns)
+    writer.close()
+
+    # each rotated file was submitted for upload separately
+    assert len(uploads) == 3
+    assert len(writer.closed_files) == 3
+    assert all(m.file_path.endswith(".reference") for m in writer.closed_files)
+
+
+def test_remote_buffered_writer_skip_flush_discards_file(tmp_path: Path) -> None:
+    local_path = tmp_path / "local"
+    remote_path = tmp_path / "remote"
+    local_path.mkdir()
+    remote_path.mkdir()
+
+    uploads: List[Tuple[str, str, str, str]] = []
+    writer = _make_remote_writer(local_path, remote_path, uploads)
+    writer.write_data_item([{"id": 1}], {"id": {"name": "id", "data_type": "bigint"}})
+    # force open file so there is something to discard
+    writer._flush_items()
+    writer.close(skip_flush=True)
+
+    assert uploads == []
+    assert writer.closed_files == []
+    # partial local file was removed
+    assert os.listdir(local_path) == []
 
 
 def test_simple_jsonl_writer(jsonl_writer: _BytesIOWriter) -> None:

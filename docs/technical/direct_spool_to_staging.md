@@ -23,7 +23,7 @@ No semantic changes are introduced to the core dlt package lifecycle. The packag
 - **Load:** `FilesystemLoadJob` (`dlt/destinations/impl/filesystem/filesystem.py:124`) uploads local files to a structured remote path under the staging directory. Once finished, it emits a `ReferenceFollowupJobRequest` (`dlt/destinations/job_impl.py:129`), which is a text file containing the remote URL. The final database destination processes this stub as a COPY job.
 
 ### 2. Direct Spool Flow
-- **Extract:** `ArrowExtractor` uses a new `RemoteBufferedWriter` that writes directly to the staging bucket via `fsspec` streams. When a file closes (by item/byte size rotation), the extractor uploads the Parquet footer, finalizes the multipart upload, and writes a tiny `.reference` file containing the remote URL directly into the local extracted package.
+- **Extract:** `ArrowExtractor` uses a new `RemoteBufferedWriter` that writes Parquet files locally and, when a file closes (by item/byte size rotation), hands it to a parallel upload pool on `StagingSpool`. The upload writes a tiny `.reference` file containing the remote URL directly into the local extracted package and deletes the local Parquet file, so extraction and uploads overlap and multiple files upload concurrently. All uploads are drained before the package commits.
 - **Normalize:** A lightweight pass-through handler skips traditional normalization for `.reference` files and moves them directly to the `new_jobs` loading folder.
 - **Load:** The loader processes `.reference` files identically to existing reference jobs, resolving URLs and triggering the destination warehouse's `COPY` commands.
 
@@ -31,23 +31,24 @@ No semantic changes are introduced to the core dlt package lifecycle. The packag
 
 ## Detailed Design & Work Packages
 
-### WP1 — `RemoteBufferedWriter`
-**Target Files:** Create `dlt/common/data_writers/remote.py` (or subclass in `dlt/common/data_writers/buffered.py`).
+### WP1 — `RemoteBufferedWriter` (parallel upload on rotation)
+**Target Files:** `dlt/common/data_writers/remote.py`.
 
-Subclass `BufferedDataWriter` to intercept and redirect the stream:
-- **`_open_writer()` Override:** Instead of opening local file handles (`buffered.py:267`), open a write-stream via `fs.open(remote_url, "wb")` where `fs` is the staging `fsspec` instance. Since `pyarrow.parquet.ParquetWriter` writes sequentially, it does not require a seekable stream.
-- **Size-based Rotation:** `fs.open` files in s3fs, gcsfs, and adlfs buffer blocks in memory (defaulting to ~50MB) and upload via multipart. `tell()` remains functional on these buffers, ensuring `file_max_bytes` rotation checks work unmodified (`buffered.py:122`).
-- **`_flush_and_close_file()` Override:** Upon file completion, close the fsspec handle to write the Parquet footer and finalize the remote multipart upload. Write a local `.reference` stub (carrying the remote URL on a single line) at the local file template path.
-- **Metrics:** Report `DataWriterMetrics` with `file_path` pointing to the local `.reference` stub so extract metrics (`extract.py:407`) can parse job IDs correctly. Record remote byte count.
-- **Failure Abort:** If closed in an exception context (`close(skip_flush=True)`), ensure the `fsspec` file aborts (discards its buffered parts) to prevent orphaned, partial objects from becoming visible in the bucket.
+Subclass `BufferedDataWriter` that writes locally and uploads asynchronously:
+- **Local Serialization:** Items are written to a local Parquet file exactly like the base class — no changes to buffering or rotation logic.
+- **`_flush_and_close_file()` Override:** Upon file completion (close or rotation via `file_max_items`/`file_max_bytes`), the closed local file is handed to the `StagingSpool` upload pool via `submit_upload(local_path, remote_path, remote_url, reference_path)`. The upload task copies the file to the bucket, writes the local `.reference` stub (carrying the remote URL) and deletes the local Parquet file. Because the stub is written only after a successful upload, a missing stub always marks an incomplete upload.
+- **Metrics:** Report `DataWriterMetrics` with `file_path` pointing to the local `.reference` stub so extract metrics can parse job IDs correctly; byte count equals the local (= remote) file size.
+- **Failure Abort:** If closed in an exception context (`close(skip_flush=True)`), the partial local file is deleted and no upload is scheduled. Remote cleanup is owned by `StagingSpool.abort()`.
+- **Rotation Requirement:** Upload parallelism only materializes when files rotate. `file_max_items`/`file_max_bytes` (or the destination's `recommended_file_size`) must be configured for large tables.
 
-### WP2 — `StagingSpool` Path Builder
-**Target Files:** Create `dlt/extract/staging_spool.py`.
+### WP2 — `StagingSpool` Path Builder & Upload Pool
+**Target Files:** `dlt/extract/staging_spool.py`.
 
-A helper instantiated per `(schema, load_id)` during extraction:
+A helper instantiated per `(schema, load_id)` during extraction (reused across repeated extracts for the same load id so pending uploads are tracked in one place):
 - Reuses the staging `FilesystemClient` configuration (`dlt/destinations/impl/filesystem/filesystem.py:144-173`) to instantiate the remote client with the source schema.
 - Reuses `path_utils.create_path` to build remote paths that are byte-identical to what the loader would construct (utilizing layout, schema, load ID, and package `created_at` timestamp).
 - Exposes `make_remote_url(local_job_file_name) -> str` and the authenticated `fsspec` filesystem instance.
+- **Upload Pool:** Owns a `ThreadPoolExecutor` (`extract.spool_upload_workers`, default 4) executing uploads in parallel. `submit_upload` applies backpressure via a bounded semaphore (2x workers) so extraction cannot produce local files faster than the pool drains them, and fails fast if a previously scheduled upload failed. `drain()` waits for all pending uploads and re-raises the first failure — it is called in `manage_writers` after writers close and before the package may be committed. `abort()` cancels pending uploads, waits for in-flight ones and removes the remote load-id prefix.
 - **Graceful Fallback:** If staging credentials or client configuration cannot be resolved during extraction, log a warning and fall back to the normal local spooling path.
 
 ### WP3 — Eligibility Gate & Extractor Routing
@@ -81,7 +82,7 @@ A helper instantiated per `(schema, load_id)` during extraction:
 **Target Files:** `dlt/extract/extract.py` (`manage_writers`), `dlt/cli/pipeline_command.py`.
 
 - **Writer Abort:** Implement robust cleanup inside the extractor's exception managers to ensure interrupted write buffers are aborted.
-- **Extract Failure:** If extraction fails, trigger a best-effort delete of remote objects finalized under the active `load_id` prefix using the `StagingSpool` filesystem instance.
+- **Extract Failure:** If extraction fails (including a failed upload surfaced by `drain()`), `manage_writers` calls `StagingSpool.abort()`: pending uploads are cancelled, in-flight ones awaited, and remote objects under the active `load_id` prefix are deleted best-effort.
 - **Vacuum Utilities:** Extend `dlt pipeline drop-pending-packages` to sweep and vacuum staging buckets of any orphaned files matching the target `load_id` namespace.
 
 ---
@@ -98,12 +99,12 @@ Test across Snowflake, BigQuery, and Databricks destinations with GCS/S3/Azure s
 Measure wall time and disk footprint against:
 - Data source: large table read via `sql_database` (Arrow backend).
 - Target: Snowflake with S3 staging.
-- Goal: Near-zero local disk write bytes and maximum overlap of extract/upload network operations.
+- Goal: Maximum overlap of extract/upload network operations; transient local disk footprint bounded by in-flight uploads (backpressure semaphore) times rotation file size.
 
 ---
 
 ## Rollout & Technical Recommendations
 
 1. **Gate Fail-Closed:** If credentials, layouts, or schemas are incompatible, direct spooling should fall back seamlessly to the standard E/N/L pipeline with a warning, avoiding crashes for end-users.
-2. **Memory Considerations:** Writing multiple streams in parallel to fsspec buffering streams increases heap allocation. Direct spooling should be restricted to a configurable number of concurrent open tables to guard against OOM on memory-constrained execution workers.
+2. **Disk Considerations:** Closed files wait on local disk until uploaded. The backpressure semaphore (2x `spool_upload_workers`) bounds the transient footprint; size `file_max_items`/`file_max_bytes` accordingly on disk-constrained workers.
 3. **Merge/SCD2 in v1:** Defer merge/SCD2 write dispositions to a v2 iteration. Verify v1 append and replace stability first. Keep an experimental merge spike test in `tests/load/` to evaluate how `_dlt_id` calculations interact with the eager upload pipeline.

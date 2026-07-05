@@ -307,6 +307,8 @@ class Extract(WithStepInfo[ExtractMetrics, ExtractInfo]):
     @configspec
     class ExtractConfiguration(BaseConfiguration):
         spool_to_staging: bool = False
+        spool_upload_workers: int = 4
+        """Number of parallel uploads when spooling directly to staging"""
 
         __section__: ClassVar[str] = known_sections.EXTRACT
 
@@ -551,15 +553,17 @@ class Extract(WithStepInfo[ExtractMetrics, ExtractInfo]):
         # self.current_source = source
         try:
             yield self.extract_storage
+            self.extract_storage.close_writers(load_id)
+            if self.staging_spool:
+                # wait for pending uploads before the package may be committed
+                self.staging_spool.drain()
         except Exception:
-            # kill writers without flushing the content
+            # kill writers without flushing the content, no-op for already closed writers
             self.extract_storage.close_writers(load_id, skip_flush=True)
             if self.staging_spool:
                 with contextlib.suppress(Exception):
-                    self.staging_spool.cleanup_load_prefix()
+                    self.staging_spool.abort()
             raise
-        else:
-            self.extract_storage.close_writers(load_id)
         finally:
             # gather metrics when storage is closed
             self.gather_metrics(load_id, source)
@@ -607,13 +611,17 @@ class Extract(WithStepInfo[ExtractMetrics, ExtractInfo]):
                 self.staging_spool = None
                 if self.config.spool_to_staging and self.staging_client:
                     try:
-                        self.staging_spool = StagingSpool(
-                            self.staging_client,
-                            source.schema.name,
-                            load_id,
-                            load_package.state["created_at"],
-                        )
-                        self.extract_storage.set_staging_spool(load_id, self.staging_spool)
+                        # reuse existing spool so pending uploads are tracked per load id
+                        self.staging_spool = self.extract_storage.get_staging_spool(load_id)
+                        if self.staging_spool is None:
+                            self.staging_spool = StagingSpool(
+                                self.staging_client,
+                                source.schema.name,
+                                load_id,
+                                load_package.state["created_at"],
+                                upload_workers=self.config.spool_upload_workers,
+                            )
+                            self.extract_storage.set_staging_spool(load_id, self.staging_spool)
                     except Exception as exc:
                         self.staging_spool = None
                         logger.warning(

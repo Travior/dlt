@@ -89,6 +89,8 @@ class TLoadPackageState(TVersionedState, TLoadPackageDropTablesState, total=Fals
     """private space for destinations to store state relevant only to the load package"""
     load_metrics: NotRequired[Dict[str, Any]]
     """Per-job load metrics, persisted so they survive process restarts"""
+    direct_spool_tables: NotRequired[List[str]]
+    """Tables spooled directly to staging during extract, excluded from staging truncation"""
 
 
 class TLoadPackage(TypedDict, total=False):

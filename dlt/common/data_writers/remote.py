@@ -7,93 +7,53 @@ from dlt.common.data_writers.buffered import BufferedDataWriter
 
 
 class RemoteBufferedWriter(BufferedDataWriter[Any]):
+    """Buffered writer that spools closed files to a remote location.
+
+    Items are written to a local file like in the base class. When the file is closed
+    or rotated, its upload is scheduled via `submit_upload` and a `.reference` stub
+    pointing to the remote url replaces it in the metrics. The stub file is created by
+    the upload only after it succeeds, so a missing stub marks an incomplete upload.
+    """
+
     def __init__(
         self,
         *args: Any,
-        fs_client: Any,
+        submit_upload: Callable[[str, str, str, str], None],
         make_remote_path: Callable[[str], str],
         make_remote_url: Callable[[str], str],
         **kwargs: Any,
     ) -> None:
-        self.fs_client = fs_client
+        self.submit_upload = submit_upload
         self.make_remote_path = make_remote_path
         self.make_remote_url = make_remote_url
-        self._remote_path: Optional[str] = None
-        self._remote_url: Optional[str] = None
         super().__init__(*args, **kwargs)
 
-    def _reference_file_name(self) -> str:
-        base_file_name, _ = os.path.splitext(self._file_name)
+    def _reference_file_name(self, file_name: str) -> str:
+        base_file_name, _ = os.path.splitext(file_name)
         return f"{base_file_name}.reference"
-
-    def _open_writer(self) -> None:
-        file_name = os.path.basename(self._file_name)
-        self._remote_path = self.make_remote_path(file_name)
-        self._remote_url = self.make_remote_url(self._remote_path)
-        parent_path = os.path.dirname(self._remote_path)
-        if parent_path:
-            self.fs_client.makedirs(parent_path, exist_ok=True)
-        self._file = self.fs_client.open(self._remote_path, "wb")
-        self._writer = self.writer_cls(self._file, caps=self._caps)  # type: ignore[assignment]
-        self._writer.write_header(self._current_columns)
-
-    def _abort_remote_file(self) -> None:
-        if self._file is not None:
-            with contextlib.suppress(Exception):
-                discard = getattr(self._file, "discard", None)
-                if discard:
-                    discard()
-            with contextlib.suppress(Exception):
-                self._file.close()
-        if self._remote_path:
-            with contextlib.suppress(Exception):
-                self.fs_client.rm(self._remote_path)
 
     def _flush_and_close_file(
         self, allow_empty_file: bool = False, skip_flush: bool = False
     ) -> DataWriterMetrics:
+        file_name: Optional[str] = self._file_name
         if skip_flush:
-            if not self._writer:
-                return None
-            self._abort_remote_file()
-            self._writer = None
-            self._file = None
-            self._file_name = None
-            self._remote_path = None
-            self._remote_url = None
-            self._created = None
-            self._last_modified = None
+            metrics = super()._flush_and_close_file(skip_flush=True)
+            if metrics is not None:
+                # discard the partial file, nothing was uploaded yet
+                self.closed_files.pop()
+                with contextlib.suppress(OSError):
+                    os.remove(file_name)
             return None
 
-        if not self._writer:
-            self._flush_items(allow_empty_file)
-            if not self._writer:
-                return None
-
-        self._flush_items(allow_empty_file)
-        self._writer.write_footer()
-        self._file.flush()
-        self._writer.close()
-        remote_bytes = self._file.tell()
-        self._file.close()
-
-        reference_file_name = self._reference_file_name()
-        with open(reference_file_name, "w", encoding="utf-8") as f:
-            f.write(self._remote_url)
-
-        metrics = DataWriterMetrics(
-            reference_file_name,
-            self._writer.items_count,
-            remote_bytes,
-            self._created,
-            self._last_modified,
-        )
-        self.closed_files.append(metrics)
-        self._writer = None
-        self._file = None
-        self._file_name = None
-        self._remote_path = None
-        self._remote_url = None
-        self._created = None
-        self._last_modified = None
+        # a file may be opened during flush so take the name after closing
+        metrics = super()._flush_and_close_file(allow_empty_file)
+        if metrics is None:
+            return None
+        local_path = metrics.file_path
+        remote_path = self.make_remote_path(os.path.basename(local_path))
+        remote_url = self.make_remote_url(remote_path)
+        reference_file_name = self._reference_file_name(local_path)
+        self.submit_upload(local_path, remote_path, remote_url, reference_file_name)
+        metrics = metrics._replace(file_path=reference_file_name)
+        self.closed_files[-1] = metrics
         return metrics

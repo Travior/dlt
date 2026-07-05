@@ -1,5 +1,5 @@
 import os
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
 from dlt.common.data_writers import TDataItemFormat, DataWriter, FileWriterSpec
 from dlt.common.data_writers.remote import RemoteBufferedWriter
@@ -45,6 +45,9 @@ class DirectSpoolExtractorItemStorage(ExtractorItemStorage):
     def has_staging_spool(self, load_id: str) -> bool:
         return load_id in self._staging_spools
 
+    def get_staging_spool(self, load_id: str) -> Optional[StagingSpool]:
+        return self._staging_spools.get(load_id)
+
     def set_direct_spool_table(self, load_id: str, schema_name: str, table_name: str) -> None:
         self._direct_spool_tables.setdefault(load_id, set()).add(table_name)
 
@@ -66,7 +69,7 @@ class DirectSpoolExtractorItemStorage(ExtractorItemStorage):
         writer = RemoteBufferedWriter(
             self.writer_spec,
             path,
-            fs_client=staging_spool.fs_client,
+            submit_upload=staging_spool.submit_upload,
             make_remote_path=staging_spool.make_remote_path,
             make_remote_url=staging_spool.make_remote_url,
             **kwargs,
@@ -128,6 +131,11 @@ class ExtractStorage(NormalizeStorage):
         storage = self.item_storages["arrow"]
         assert isinstance(storage, DirectSpoolExtractorItemStorage)
         storage.set_staging_spool(load_id, staging_spool)
+
+    def get_staging_spool(self, load_id: str) -> Optional[StagingSpool]:
+        storage = self.item_storages["arrow"]
+        assert isinstance(storage, DirectSpoolExtractorItemStorage)
+        return storage.get_staging_spool(load_id)
 
     def direct_spool_tables(self, load_id: str) -> Set[str]:
         storage = self.item_storages["arrow"]
