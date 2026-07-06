@@ -213,6 +213,19 @@ def test_parquet_writer_config() -> None:
             assert reader.metadata.row_group(0).column(0).has_offset_index is True
 
 
+@pytest.mark.parametrize("compression", ("zstd", "gzip"), ids=("zstd", "gzip"))
+def test_parquet_writer_compression_config(compression: str) -> None:
+    os.environ["NORMALIZE__DATA_WRITER__COMPRESSION"] = compression
+
+    with inject_section(ConfigSectionContext(pipeline_name=None, sections=("normalize",))):
+        with get_writer(ParquetDataWriter) as writer:
+            writer.write_data_item(
+                [{"col1": i} for i in range(100)], {"col1": new_column("col1", "bigint")}
+            )
+        with pa.parquet.ParquetFile(writer.closed_files[0].file_path) as reader:
+            assert reader.metadata.row_group(0).column(0).compression == compression.upper()
+
+
 def test_parquet_writer_config_spark() -> None:
     os.environ["NORMALIZE__DATA_WRITER__FLAVOR"] = "spark"
     os.environ["NORMALIZE__DATA_WRITER__TIMESTAMP_TIMEZONE"] = "Europe/Berlin"
