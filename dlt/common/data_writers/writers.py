@@ -366,6 +366,7 @@ class ParquetDataWriter(DataWriter):
             "allow_truncated_timestamps": self.parquet_format.allow_truncated_timestamps,
             "use_compliant_nested_type": self.parquet_format.use_compliant_nested_type,
             "write_page_index": self.parquet_format.write_page_index,
+            "compression": self.parquet_format.compression,
         }
         if Version(pyarrow.__version__).major >= 21:
             parquet_writer_kwargs["use_content_defined_chunking"] = (

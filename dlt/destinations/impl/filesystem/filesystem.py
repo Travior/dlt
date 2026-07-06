@@ -32,6 +32,7 @@ from tenacity import (
 from dlt.common import logger, time, json, pendulum
 from dlt.common.destination.utils import resolve_merge_strategy, resolve_replace_strategy
 from dlt.common.metrics import LoadJobMetrics
+from dlt.common.runtime import bench as runtime_bench
 from dlt.common.schema.exceptions import TableNotFound
 from dlt.common.schema.typing import (
     C_DLT_LOAD_ID,
@@ -107,6 +108,13 @@ INIT_FILE_NAME = "init"
 FILENAME_SEPARATOR = "__"
 
 
+def _file_size(file_path: str) -> int:
+    try:
+        return os.path.getsize(file_path)
+    except OSError:
+        return 0
+
+
 class FilesystemLoadJob(RunnableLoadJob):
     def __init__(
         self,
@@ -131,7 +139,16 @@ class FilesystemLoadJob(RunnableLoadJob):
         if self.__is_local_filesystem:
             # use os.path for local file name
             self._job_client.fs_client.makedirs(os.path.dirname(remote_path), exist_ok=True)
+        started_at = _time.perf_counter()
         self._job_client.fs_client.put_file(self._file_path, remote_path)
+        runtime_bench.event(
+            "file_upload",
+            file_size=_file_size(self._file_path),
+            table=self.load_table_name,
+            duration=_time.perf_counter() - started_at,
+            remote_url=self._job_client.make_remote_url(remote_path),
+            staging=self._job_client.config.as_staging_destination,
+        )
 
     @property
     def load_package_timestamp(self) -> Optional[pendulum.DateTime]:
@@ -740,8 +757,7 @@ class FilesystemClient(
             if (
                 # TODO: isdir is sufficient if table_dir == table prefix
                 #   since this method is used currently only for tests we do not need to improve it
-                self.fs_client.isdir(table_dir)
-                and len(self.list_table_files(table_name)) > 0
+                self.fs_client.isdir(table_dir) and len(self.list_table_files(table_name)) > 0
             ):
                 if table_name in self.schema.tables:
                     yield (table_name, self.schema.get_table_columns(table_name))

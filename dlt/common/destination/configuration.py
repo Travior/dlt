@@ -36,6 +36,8 @@ class ParquetFormatConfiguration(BaseConfiguration):
     use_compliant_nested_type: bool = True
     write_page_index: bool = False
     use_content_defined_chunking: bool = False  # requires pyarrow>=21.0.0, ignored otherwise
+    compression: str = "snappy"
+    """Parquet compression codec passed to PyArrow, e.g. `snappy`, `zstd`, `gzip`, `lz4`, `none`."""
     supports_dictionary_encoding: bool = True
     """When False, constant columns (like _dlt_load_id) will use regular arrays instead of
     dictionary-encoded arrays. Set to False for destinations using ADBC drivers that don't

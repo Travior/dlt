@@ -1,8 +1,10 @@
 import gzip
 import contextlib
+import os
 from typing import ClassVar, Iterator, List, IO, Any, Optional, Sequence, Type, Generic
 
 from dlt.common.metrics import DataWriterMetrics
+from dlt.common.runtime import bench as runtime_bench
 from dlt.common.typing import TDataItem, TDataItems
 from dlt.common.data_writers.exceptions import (
     BufferedDataWriterClosed,
@@ -298,6 +300,7 @@ class BufferedDataWriter(Generic[TWriter]):
             self._last_modified,
         )
         self.closed_files.append(metrics)
+        self._emit_writer_rotate_metrics(metrics)
         self._file.close()
         self._writer = None
         self._file = None
@@ -306,6 +309,53 @@ class BufferedDataWriter(Generic[TWriter]):
         self._last_modified = None
         return metrics
 
+    def _emit_writer_rotate_metrics(self, metrics: DataWriterMetrics) -> None:
+        fields = {
+            "file_size": metrics.file_size,
+            "items_count": metrics.items_count,
+            "table": _table_name_from_file(metrics.file_path),
+            "file_format": self.writer_spec.file_format,
+            "compression": _writer_compression(self._writer),
+        }
+        if self.writer_spec.file_format == "parquet":
+            fields.update(_parquet_size_metrics(metrics.file_path))
+        runtime_bench.event("writer_rotate", **fields)
+
     def _ensure_open(self) -> None:
         if self._closed:
             raise BufferedDataWriterClosed(self._file_name)
+
+
+def _table_name_from_file(file_path: str) -> str:
+    return os.path.basename(file_path).split(".", 1)[0]
+
+
+def _writer_compression(writer: Any) -> Optional[str]:
+    parquet_format = getattr(writer, "parquet_format", None)
+    if parquet_format is not None:
+        return getattr(parquet_format, "compression", None)
+    return None
+
+
+def _parquet_size_metrics(file_path: str) -> dict[str, float]:
+    try:
+        from dlt.common.libs.pyarrow import pyarrow
+
+        with pyarrow.parquet.ParquetFile(file_path) as reader:
+            uncompressed_size = 0
+            compressed_size = 0
+            for row_group_index in range(reader.metadata.num_row_groups):
+                row_group = reader.metadata.row_group(row_group_index)
+                for column_index in range(row_group.num_columns):
+                    column = row_group.column(column_index)
+                    uncompressed_size += column.total_uncompressed_size
+                    compressed_size += column.total_compressed_size
+    except Exception:
+        return {}
+    if uncompressed_size <= 0 or compressed_size <= 0:
+        return {}
+    return {
+        "uncompressed_size": uncompressed_size,
+        "compressed_size": compressed_size,
+        "compression_ratio": uncompressed_size / compressed_size,
+    }
