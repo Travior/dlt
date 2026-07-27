@@ -1,9 +1,11 @@
 import dataclasses
+import warnings
 from typing import ClassVar, Any, Final, List, Dict, Optional
 
 from dlt.common.configuration import configspec
 from dlt.common.configuration.specs import ConnectionStringCredentials
 from dlt.common.typing import TSecretStrValue
+from dlt.common.warnings import DltDeprecationWarning
 
 from dlt.common.destination.client import DestinationClientDwhWithStagingConfiguration
 from dlt.common.utils import digest128
@@ -71,6 +73,14 @@ class MsSqlCredentials(ConnectionStringCredentials):
         self.connect_timeout = int(self.query.get("connect_timeout", self.connect_timeout))
 
     def on_resolved(self) -> None:
+        if self.driver:
+            warnings.warn(
+                DltDeprecationWarning(
+                    "`driver` is deprecated and ignored; mssql-python bundles its own driver",
+                    since="1.30.0",
+                ),
+                stacklevel=2,
+            )
         self.database = self.database.lower()
 
     def get_query(self) -> Dict[str, Any]:
