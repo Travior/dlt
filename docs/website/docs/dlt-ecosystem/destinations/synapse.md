@@ -18,15 +18,9 @@ pip install "dlt[synapse]"
 
 ### Prerequisites
 
-* **Microsoft ODBC Driver for SQL Server**
+* **Microsoft's mssql-python driver**
 
-    The _Microsoft ODBC Driver for SQL Server_ must be installed to use this destination.
-    This cannot be included with `dlt`'s Python dependencies, so you must install it separately on your system. You can find the official installation instructions [here](https://learn.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server?view=sql-server-ver16).
-
-    Supported driver versions:
-    * `ODBC Driver 18 for SQL Server`
-
-    > 💡 Older driver versions do not work properly because they do not support the `LongAsMax` keyword that was [introduced](https://learn.microsoft.com/en-us/sql/connect/odbc/windows/features-of-the-microsoft-odbc-driver-for-sql-server-on-windows?view=sql-server-ver15#microsoft-odbc-driver-180-for-sql-server-on-windows) in `ODBC Driver 18 for SQL Server`. Synapse does not support the legacy ["long data types"](https://learn.microsoft.com/en-us/sql/t-sql/data-types/ntext-text-and-image-transact-sql), and requires "max data types" instead. `dlt` uses the `LongAsMax` keyword to automatically do the conversion.
+    `dlt[synapse]` installs `mssql-python>=1.13.0`, which manages its SQL Server driver dependency. No separate Microsoft ODBC driver installation is needed for dlt SQL connections. The legacy `driver` credential is deprecated and ignored, and `LongAsMax` is no longer sent to the driver. See the [MS SQL prerequisites](mssql.md#prerequisites) for optional Ibis requirements. The SQLAlchemy example below uses a separate pyodbc connection and still requires its ODBC driver.
 * **Azure Synapse Workspace and dedicated SQL pool**
 
     You need an Azure Synapse workspace with a dedicated SQL pool to load data into. If you do not have one yet, you can use this [quickstart](https://learn.microsoft.com/en-us/azure/synapse-analytics/quickstart-create-sql-pool-studio).
@@ -228,7 +222,7 @@ Descriptions:
 - `create_indexes` determines if `primary_key` and `unique` [column hints](#supported-column-hints) are applied.
 - `staging_use_msi` determines if the Managed Identity of the Synapse workspace is used to authorize access to the [staging](#staging-support) Storage Account. Ensure the Managed Identity has the [Storage Blob Data Reader](https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles#storage-blob-data-reader) role (or a higher-privileged role) assigned on the blob container if you set this option to `"true"`.
 - `port` is used for the ODBC connection.
-- `connect_timeout` sets the timeout for the `pyodbc` connection attempt, in seconds.
+- `connect_timeout` sets the timeout for the `mssql-python` connection attempt, in seconds.
 
 ### dbt support
 Integration with [dbt](../transformations/dbt/dbt.md) is supported via `dbt-synapse`. Only **sql** authentication is supported.

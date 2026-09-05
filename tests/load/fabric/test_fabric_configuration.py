@@ -66,10 +66,10 @@ def test_fabric_credentials_odbc_dsn() -> None:
 
     # Verify Fabric-specific parameters are added
     assert dsn_dict["AUTHENTICATION"] == "ActiveDirectoryServicePrincipal"
-    assert dsn_dict["LongAsMax"] == "yes"
+    assert "LongAsMax" not in dsn_dict
     assert dsn_dict["UID"] == "test-client-id@test-tenant-id"
     assert dsn_dict["PWD"] == "test-client-secret"
-    assert dsn_dict["DRIVER"] == "{ODBC Driver 18 for SQL Server}"
+    assert "DRIVER" not in dsn_dict
     assert (
         dsn_dict["SERVER"]
         == "abc12345-6789-def0-1234-56789abcdef0.datawarehouse.fabric.microsoft.com,1433"
@@ -192,8 +192,8 @@ def test_fabric_credentials_no_driver_validation() -> None:
     assert creds.database == "test_db"
 
 
-def test_fabric_credentials_longasmax_always_yes() -> None:
-    """Test that LONGASMAX is always set to 'yes' for UTF-8 support"""
+def test_fabric_credentials_longasmax_absent() -> None:
+    """mssql-python does not accept LongAsMax."""
     creds = FabricCredentials()
     creds.host = "test.datawarehouse.fabric.microsoft.com"
     creds.database = "testdb"
@@ -201,9 +201,9 @@ def test_fabric_credentials_longasmax_always_yes() -> None:
     creds.azure_client_id = "test-client"
     creds.azure_client_secret = "test-secret"
 
-    # Get ODBC DSN and verify LONGASMAX is set to yes
+    # LongAsMax belongs to the old pyodbc connector.
     dsn_dict = creds.get_odbc_dsn_dict()
-    assert dsn_dict["LongAsMax"] == "yes"
+    assert "LongAsMax" not in dsn_dict
 
 
 def test_fabric_credentials_authentication_method() -> None:

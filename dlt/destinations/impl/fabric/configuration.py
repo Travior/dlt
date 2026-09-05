@@ -8,6 +8,7 @@ from dlt.common.destination.client import DestinationClientDwhWithStagingConfigu
 from dlt.common.exceptions import MissingDependencyException
 from dlt.common.utils import digest128
 from dlt import version
+from dlt.destinations.impl.mssql.configuration import build_odbc_dsn
 
 _AZURE_STORAGE_EXTRA = f"{version.DLT_PKG_NAME}[az]"
 
@@ -57,11 +58,9 @@ class FabricCredentials(AzureServicePrincipalCredentials):
     def get_odbc_dsn_dict(self) -> Dict[str, Any]:
         """Build ODBC DSN dictionary with Fabric-specific settings."""
         params = {
-            "DRIVER": "{ODBC Driver 18 for SQL Server}",
             "SERVER": f"{self.host},{self.port}",
             "DATABASE": self.database,
             "AUTHENTICATION": "ActiveDirectoryServicePrincipal",
-            "LongAsMax": "yes",  # Required for UTF-8 collation support
             "Encrypt": "yes",
             "TrustServerCertificate": "no",
         }
@@ -74,9 +73,9 @@ class FabricCredentials(AzureServicePrincipalCredentials):
         return params
 
     def to_odbc_dsn(self) -> str:
-        """Build ODBC connection string for pyodbc."""
+        """Build a connection string for mssql-python."""
         params = self.get_odbc_dsn_dict()
-        return ";".join(f"{k}={v}" for k, v in params.items())
+        return build_odbc_dsn(params)
 
     def to_native_credentials(self) -> Optional[Any]:
         """Return credentials in a format suitable for the native driver/library."""
@@ -164,7 +163,7 @@ class FabricClientConfiguration(DestinationClientDwhWithStagingConfiguration):
     - Latin1_General_100_BIN2_UTF8 (default, case-sensitive)
     - Latin1_General_100_CI_AS_KS_WS_SC_UTF8 (case-insensitive)
 
-    Both have UTF-8 encoding. LongAsMax=yes is automatically configured.
+    Both have UTF-8 encoding. mssql-python does not accept the LongAsMax option.
     """
 
     def data_location(self) -> str:

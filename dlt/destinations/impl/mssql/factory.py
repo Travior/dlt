@@ -176,10 +176,28 @@ class mssql(Destination[MsSqlClientConfiguration, "MsSqlJobClient"]):
     ) -> "BaseBackend":
         """Create an ibis mssql backend for the client's dataset."""
         from dlt.helpers.ibis import ibis
+        import pyodbc
+        from dlt.common.exceptions import SystemConfigurationException
 
+        # Ibis still uses pyodbc, including its binary datetimeoffset converter. Keep
+        # driver discovery here rather than requiring system ODBC for dlt connections.
+        driver = client.config.credentials.driver
+        if not driver:
+            available = pyodbc.drivers()
+            supported = ["ODBC Driver 18 for SQL Server"]
+            if client.config.destination_type != "synapse":
+                supported.append("ODBC Driver 17 for SQL Server")
+            driver = next(
+                (d for d in supported if d in available),
+                None,
+            )
+        if not driver:
+            raise SystemConfigurationException(
+                "The Ibis MSSQL backend requires Microsoft ODBC Driver 18 or 17 for SQL Server."
+            )
         ms_credentials = client.config.credentials.to_native_representation()
         ms_credentials = ms_credentials.replace("synapse://", "mssql://")
-        return ibis.connect(ms_credentials, driver=client.config.credentials.driver)
+        return ibis.connect(ms_credentials, driver=driver)
 
     def __init__(
         self,

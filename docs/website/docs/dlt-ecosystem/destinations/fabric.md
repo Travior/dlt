@@ -20,14 +20,7 @@ This will install `dlt` with the `mssql` extra, which contains all the dependenc
 
 ### Prerequisites
 
-The _Microsoft ODBC Driver for SQL Server_ must be installed to use this destination.
-This cannot be included with `dlt`'s Python dependencies, so you must install it separately on your system. You can find the official installation instructions [here](https://learn.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server?view=sql-server-ver16).
-
-Supported driver versions:
-* `ODBC Driver 18 for SQL Server` (recommended)
-* `ODBC Driver 17 for SQL Server`
-
-You can also [configure the driver name](#additional-destination-options) explicitly.
+`dlt[fabric]` installs Microsoft's [`mssql-python`](https://github.com/microsoft/mssql-python) driver (version 1.13.0 or newer), which manages its SQL Server driver dependency. No separate Microsoft ODBC driver installation is needed for dlt SQL connections. Follow the driver's installation instructions for any platform-specific system libraries.
 
 ### Service Principal Authentication
 
@@ -169,7 +162,7 @@ Fabric does not support native JSON columns. JSON objects are stored as `varchar
 
 ## Collation Support
 
-Fabric Warehouse supports UTF-8 collations. The destination automatically configures `LongAsMax=yes` which is required for UTF-8 collations to work properly.
+Fabric Warehouse supports UTF-8 collations. The destination uses `mssql-python` for SQL connections; it does not send the unsupported `LongAsMax` keyword.
 
 **Default collation**: `Latin1_General_100_BIN2_UTF8` (case-sensitive, UTF-8)
 
@@ -197,11 +190,7 @@ The **fabric** destination **does not** create UNIQUE indexes by default on colu
 create_indexes=true
 ```
 
-You can explicitly set the ODBC driver name:
-```toml
-[destination.fabric.credentials]
-driver="ODBC Driver 18 for SQL Server"
-```
+The SQL driver is managed by `mssql-python`; there is no ODBC driver name to configure.
 
 ## Differences from MSSQL Destination
 
@@ -209,7 +198,7 @@ While Fabric Warehouse is based on SQL Server, there are key differences:
 
 1. **Authentication**: Fabric requires Service Principal; username/password auth is not supported
 2. **Type System**: Uses `varchar` and `datetime2` instead of `nvarchar` and `datetimeoffset`
-3. **Collation**: Optimized for UTF-8 collations with automatic `LongAsMax` configuration
+3. **Collation**: Optimized for UTF-8 collations
 4. **SQL Dialect**: Uses `fabric` SQLglot dialect for proper SQL generation
 
 ### dbt support
@@ -217,17 +206,9 @@ Integration with [dbt](../transformations/dbt/dbt.md) is supported via [dbt-fabr
 
 ## Troubleshooting
 
-### ODBC Driver Not Found
+### Driver installation
 
-If you see "No supported ODBC driver found", install the Microsoft ODBC Driver 18 for SQL Server:
-
-```sh
-# Ubuntu/Debian
-curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
-curl https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
-sudo apt-get update
-sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
-```
+Ensure `dlt[fabric]` and the platform-specific system libraries required by `mssql-python` are installed. SQLAlchemy and dbt integrations may still require their own ODBC installation.
 
 ### Authentication Failures
 
@@ -240,7 +221,7 @@ Ensure your Service Principal has:
 
 If you experience character encoding issues:
 1. Verify your warehouse uses a UTF-8 collation
-2. Check that `LongAsMax=yes` is in the connection (automatically added by this destination)
+2. Use a supported `mssql-python` version; do not add `LongAsMax` to its connection string
 3. Consider using the case-insensitive UTF-8 collation if needed
 
 ## Additional Resources

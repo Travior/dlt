@@ -18,14 +18,9 @@ pip install "dlt[mssql]"
 
 ### Prerequisites
 
-The _Microsoft ODBC Driver for SQL Server_ must be installed to use this destination.
-This cannot be included with `dlt`'s Python dependencies, so you must install it separately on your system. You can find the official installation instructions [here](https://learn.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server?view=sql-server-ver16).
+The destination uses Microsoft's [`mssql-python`](https://github.com/microsoft/mssql-python) driver (version 1.13.0 or newer), installed by `dlt[mssql]`. It manages its SQL Server driver dependency; no separate Microsoft ODBC driver installation is needed for dlt SQL connections. Your platform may still require the system libraries listed in the driver's installation instructions.
 
-Supported driver versions:
-* `ODBC Driver 18 for SQL Server`
-* `ODBC Driver 17 for SQL Server`
-
-You can also [configure the driver name](#additional-destination-options) explicitly.
+The optional Ibis backend still uses `pyodbc`. Install `ibis-framework[mssql]` and Microsoft ODBC Driver 18 or 17 for SQL Server to use it. This requirement does not apply to loading data with dlt.
 
 ### Create a pipeline
 
@@ -60,17 +55,15 @@ connect_timeout = 15
 TrustServerCertificate="yes"
 # require SSL connection
 Encrypt="yes"
-# send large string as VARCHAR, not legacy TEXT
-LongAsMax="yes"
 ```
 
 You can also pass a SQLAlchemy-like database connection:
 ```toml
 # Keep it at the top of your TOML file, before any section starts
-destination.mssql.credentials="mssql://loader:<password>@loader.database.windows.net/dlt_data?TrustServerCertificate=yes&Encrypt=yes&LongAsMax=yes"
+destination.mssql.credentials="mssql://loader:<password>@loader.database.windows.net/dlt_data?TrustServerCertificate=yes&Encrypt=yes"
 ```
 
-You can place any ODBC-specific settings into the query string or **destination.mssql.credentials.query** TOML table as in the example above.
+You can place settings supported by `mssql-python` into the query string or **destination.mssql.credentials.query** TOML table as in the example above. Unlike `pyodbc`, the driver rejects unknown connection-string keywords.
 
 **To connect to an `mssql` server using Windows authentication**, include `trusted_connection=yes` in the connection string.
 
@@ -92,10 +85,7 @@ destination.mssql.credentials="mssql://loader:loader@localhost/dlt_data?encrypt=
 destination.mssql.credentials="mssql://loader:loader@localhost/dlt_data?TrustServerCertificate=yes"
 ```
 
-**To use long strings (>8k) and avoid collation errors**:
-```toml
-destination.mssql.credentials="mssql://loader:loader@localhost/dlt_data?LongAsMax=yes"
-```
+`mssql-python` handles long string parameters without the `LongAsMax` option. Legacy `LongAsMax` settings are ignored by the dlt SQL connector.
 
 **To pass credentials directly**, use the [explicit instance of the destination](../../general-usage/destination.md#pass-explicit-credentials)
 ```py
@@ -143,7 +133,7 @@ We copy parquet files with batches of size of 1 row group. All groups are copied
 :::caution
 It looks like ADBC driver is based on [go-mssqldb](https://github.com/denisenkom/go-mssqldb?tab=readme-ov-file)
 
-DSN format is different. We translate a few overlapping keys. `pyodbc` and `adbc` ignore unknown keys so you can specify keys for both in the same string.
+DSN format is different. We translate a few overlapping keys. The SQL connector now uses `mssql-python`, which rejects unknown keywords; connection options must also be accepted by that driver. Parquet loading continues to use ADBC, not `mssql-python` bulk copy.
 :::
 
 You can go back to `insert_values` by passing `loader_file_format` to a resource or pipeline
@@ -157,10 +147,10 @@ pipeline.run(data_iter, dataset_name="speed_test_2", write_disposition="replace"
 Data is loaded via INSERT statements by default. MSSQL has a limit of 1000 rows per INSERT, and this is what we use. We send multiple
 sql statements in a single batch. In case you observe odbc driver locking (i.e. when connection with open transaction leaks into the pool) you can:
 
-1. disable `pyodbc` connection pool.
+1. Disable the `mssql-python` connection pool before opening any connections. This setting affects all uses of the driver in the process; dlt does not change it automatically.
 ```py
-import pyodbc
-pyodbc.pooling = False
+import mssql_python
+mssql_python.pooling(enabled=False)
 ```
 
 2. disable batching of multiple statements in `dlt`
@@ -198,18 +188,7 @@ The **mssql** destination **does not** create UNIQUE indexes by default on colum
 create_indexes=true
 ```
 
-You can explicitly set the ODBC driver name:
-```toml
-[destination.mssql.credentials]
-driver="ODBC Driver 18 for SQL Server"
-```
-
-When using a SQLAlchemy connection string, replace spaces with `+`:
-
-```toml
-# Keep it at the top of your TOML file, before any section starts
-destination.mssql.credentials="mssql://loader:<password>@loader.database.windows.net/dlt_data?driver=ODBC+Driver+18+for+SQL+Server"
-```
+The legacy `driver` credential is accepted for compatibility but deprecated and ignored by dlt SQL connections. It is still honored by the optional pyodbc-based Ibis backend; otherwise Ibis selects an installed Microsoft ODBC Driver 18 or 17.
 
 ### dbt support
 This destination [integrates with dbt](../transformations/dbt/dbt.md) via [dbt-sqlserver](https://github.com/dbt-msft/dbt-sqlserver).

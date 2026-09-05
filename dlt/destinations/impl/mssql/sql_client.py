@@ -67,9 +67,12 @@ class MsSqlClient(SqlClientBase[mssql_python.Connection], DBTransaction):
 
     @raise_database_error
     def rollback_transaction(self) -> None:
-        # mssql-python treats a rollback without an active transaction as a no-op.
         try:
             self._conn.rollback()
+        except mssql_python.ProgrammingError as ex:
+            # Synapse can invalidate the transaction when a statement fails.
+            if "111214" not in str(ex) and "No corresponding transaction found" not in str(ex):
+                raise
         finally:
             self._conn.autocommit = True
 

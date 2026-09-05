@@ -120,7 +120,7 @@ def test_malformed_query_parameters(
     if client.sql_client.dbapi.paramstyle == "pyformat":
         expected_ex = (
             DatabaseTerminalException
-            if client.config.destination_type == "mssql"
+            if client.config.destination_type in ("mssql", "synapse", "fabric")
             else DatabaseTransientException
         )
         with pytest.raises(expected_ex) as param_ex:
@@ -198,7 +198,7 @@ def test_malformed_execute_parameters(
     if client.sql_client.dbapi.paramstyle == "pyformat":
         expected_ex = (
             DatabaseTerminalException
-            if client.config.destination_type == "mssql"
+            if client.config.destination_type in ("mssql", "synapse", "fabric")
             else DatabaseTransientException
         )
         with pytest.raises(expected_ex) as param_ex:
@@ -432,7 +432,7 @@ def test_database_exceptions(client: SqlJobClientBaseWithDestinationTestConfigur
     # invalid syntax
     _syntax_ex = (
         DatabaseTerminalException
-        if client.config.destination_type == "mssql"
+        if client.config.destination_type in ("mssql", "synapse", "fabric")
         else DatabaseTransientException
     )
     with pytest.raises(_syntax_ex) as term_ex:
@@ -771,7 +771,7 @@ def test_recover_on_explicit_tx(client: SqlJobClientBaseWithDestinationTestConfi
     sql = f"SELEXT * FROM {version_table}"
     _syntax_ex = (
         DatabaseTerminalException
-        if client.config.destination_type == "mssql"
+        if client.config.destination_type in ("mssql", "synapse", "fabric")
         else DatabaseTransientException
     )
     with pytest.raises(_syntax_ex):
