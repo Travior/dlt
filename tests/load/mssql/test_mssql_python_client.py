@@ -83,6 +83,84 @@ def test_query_parameters(client: MsSqlClient, query, args, kwargs, expected) ->
     cursor.close.assert_called_once()
 
 
+@pytest.mark.parametrize("failure_at", ["execute", "fetch", "nextset", "consumer"])
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_query_failure_preserves_original_error(
+    client: MsSqlClient, failure_at: str, cleanup_fails: bool
+) -> None:
+    connection = Mock()
+    cursor = connection.cursor.return_value
+    cursor.description = None
+    cursor.nextset.return_value = False
+    client._conn = connection
+    error = mssql_python.ProgrammingError("Syntax error or access violation", "original")
+    consumer_error = ValueError("consumer failed")
+    if failure_at == "execute":
+        cursor.execute.side_effect = error
+    elif failure_at == "fetch":
+        cursor.fetchall.side_effect = error
+    elif failure_at == "nextset":
+        cursor.nextset.side_effect = [True, error]
+    if cleanup_fails:
+        cursor.close.side_effect = mssql_python.OperationalError("cleanup", "close failed")
+        connection.rollback.side_effect = mssql_python.OperationalError(
+            "cleanup", "rollback failed"
+        )
+
+    expected = ValueError if failure_at == "consumer" else DatabaseTerminalException
+    with pytest.raises(expected) as exc:
+        with client.execute_query("SELECT 1; SELECT 2") as result:
+            if failure_at == "fetch":
+                result.fetchall()
+            elif failure_at == "consumer":
+                raise consumer_error
+
+    if failure_at == "consumer":
+        assert exc.value is consumer_error
+        connection.rollback.assert_not_called()
+    else:
+        assert isinstance(exc.value, DatabaseTerminalException)
+        assert exc.value.dbapi_exception is error
+        connection.rollback.assert_called_once()
+    cursor.close.assert_called_once()
+    assert cursor.nextset.call_count == (2 if failure_at == "nextset" else 0)
+
+
+def test_query_drains_all_results(client: MsSqlClient) -> None:
+    client._conn = Mock()
+    cursor = client._conn.cursor.return_value
+    cursor.description = None
+    cursor.nextset.side_effect = [True, True, False]
+    with client.execute_query("SELECT 1; SELECT 2; SELECT 3"):
+        pass
+    assert cursor.nextset.call_count == 3
+    cursor.close.assert_called_once()
+    client._conn.rollback.assert_not_called()
+
+
+def test_query_close_failure_is_not_swallowed(client: MsSqlClient) -> None:
+    client._conn = Mock()
+    cursor = client._conn.cursor.return_value
+    cursor.description = None
+    cursor.nextset.return_value = False
+    error = mssql_python.OperationalError("close", "connection lost")
+    cursor.close.side_effect = error
+    with pytest.raises(DatabaseTransientException) as exc:
+        with client.execute_query("SELECT 1"):
+            pass
+    assert exc.value.dbapi_exception is error
+    cursor.close.assert_called_once()
+
+
+def test_mixed_parameters_are_rejected(client: MsSqlClient) -> None:
+    client._conn = Mock()
+    client._conn.cursor.return_value.nextset.return_value = False
+    with pytest.raises(TypeError, match="positional and named"):
+        with client.execute_query("SELECT %s, %(value)s", 1, value=2):
+            pass
+    client._conn.cursor.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "error,expected",
     [
@@ -96,6 +174,20 @@ def test_query_parameters(client: MsSqlClient, query, args, kwargs, expected) ->
         ),
         (
             mssql_python.ProgrammingError("Syntax error or access violation", "syntax"),
+            DatabaseTerminalException,
+        ),
+        (
+            mssql_python.ProgrammingError(
+                "Syntax error or access violation",
+                "Cannot find the schema 'missing', because it does not exist or you do not have"
+                " permission.",
+            ),
+            DatabaseUndefinedRelation,
+        ),
+        (
+            mssql_python.ProgrammingError(
+                "Syntax error or access violation", "Custom type does not exist"
+            ),
             DatabaseTerminalException,
         ),
         (
@@ -134,6 +226,15 @@ def test_synapse_rollback(client: MsSqlClient, message: str) -> None:
     assert client._conn.autocommit is True
 
 
+def test_unrelated_rollback_error_is_not_suppressed(client: MsSqlClient) -> None:
+    client._conn = Mock()
+    error = mssql_python.ProgrammingError("Syntax error or access violation", "Error 1112140")
+    client._conn.rollback.side_effect = error
+    with pytest.raises(DatabaseTerminalException) as exc:
+        client.rollback_transaction()
+    assert exc.value.dbapi_exception is error
+
+
 def test_transactions(client: MsSqlClient) -> None:
     client._conn = Mock()
     with client.begin_transaction():
@@ -148,6 +249,17 @@ def test_transactions(client: MsSqlClient) -> None:
     with pytest.raises(DatabaseTransientException):
         client.rollback_transaction()
     assert client._conn.autocommit is True
+
+
+def test_transaction_rollback_failure_preserves_body_error(client: MsSqlClient) -> None:
+    client._conn = Mock()
+    client._conn.rollback.side_effect = mssql_python.OperationalError("rollback", "connection lost")
+    error = ValueError("original")
+    with pytest.raises(ValueError) as exc:
+        with client.begin_transaction():
+            raise error
+    assert exc.value is error
+    client._conn.rollback.assert_called_once()
 
 
 def test_legacy_driver_warning() -> None:

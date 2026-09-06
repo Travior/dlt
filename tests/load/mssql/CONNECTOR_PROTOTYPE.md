@@ -77,6 +77,15 @@ uv run --no-sync pytest \
   tests/common/configuration/test_credentials.py -q
 ```
 
-Result: **108 passed**, including Ibis checks, on mssql-python 1.13.0 and 1.14.0.
+Result: **123 passed**, including Ibis checks, on mssql-python 1.13.0 and 1.14.0.
 Targeted mypy, Ruff, Flake8, Black and `uv lock --check` also pass. The shared live SQL test
 expectations were updated and type-checked, but were not executed against a server.
+
+## Core review follow-up
+
+The SQL client now drains successful batches once, propagates deferred statement errors,
+and closes failed cursors without advancing further. DB-API cleanup/rollback failures do not
+replace the original error. Consumer exceptions pass through unchanged, mixed positional/named
+parameters fail before execution, and server-message fallbacks are narrower. The regression
+tests first reproduced the previous failure behavior. This follow-up changes only the SQL client,
+its tests and these notes; it introduces no helpers, new auth behavior or ADBC changes.

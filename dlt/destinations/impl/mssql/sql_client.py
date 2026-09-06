@@ -2,10 +2,11 @@ from dlt.common.destination import DestinationCapabilitiesContext
 
 import mssql_python
 
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from typing import Any, AnyStr, ClassVar, Iterator, Optional, Sequence, Tuple
 
 from dlt.destinations.exceptions import (
+    DatabaseException,
     DatabaseTerminalException,
     DatabaseTransientException,
     DatabaseUndefinedRelation,
@@ -56,8 +57,10 @@ class MsSqlClient(SqlClientBase[mssql_python.Connection], DBTransaction):
             self._conn.autocommit = False
             yield self
             self.commit_transaction()
-        except Exception:
-            self.rollback_transaction()
+        except BaseException:
+            # A failed rollback must not replace the error that aborted the transaction.
+            with suppress(DatabaseException):
+                self.rollback_transaction()
             raise
 
     @raise_database_error
@@ -71,7 +74,8 @@ class MsSqlClient(SqlClientBase[mssql_python.Connection], DBTransaction):
             self._conn.rollback()
         except mssql_python.ProgrammingError as ex:
             # Synapse can invalidate the transaction when a statement fails.
-            if "111214" not in str(ex) and "No corresponding transaction found" not in str(ex):
+            message = ex.ddbc_error.lower()
+            if "(111214)" not in message and "no corresponding transaction found" not in message:
                 raise
         finally:
             self._conn.autocommit = True
@@ -124,11 +128,13 @@ class MsSqlClient(SqlClientBase[mssql_python.Connection], DBTransaction):
     @raise_database_error
     def execute_query(self, query: AnyStr, *args: Any, **kwargs: Any) -> Iterator[DBApiCursor]:
         assert isinstance(query, str)
+        if args and kwargs:
+            raise TypeError("Cannot mix positional and named query parameters")
         if args:
             # dlt emits %s positional placeholders; mssql-python expects qmark (?)
             # TODO: this is bad. See duckdb & athena also
             query = query.replace("%s", "?")
-        # NOTE: do not convert it into context manager. it does not close the cursor!
+        # Own the cursor lifetime so cleanup cannot mask a query failure.
         curr = self._conn.cursor()
         try:
             if kwargs:
@@ -139,43 +145,38 @@ class MsSqlClient(SqlClientBase[mssql_python.Connection], DBTransaction):
                 curr.execute(query, *args)
             # NOTE: firsts recordset is wrapped in a cursor
             yield DBApiCursorImpl(curr)  # type: ignore[arg-type]
-            # clear all pending result sets
-            try:
-                while curr.nextset():
-                    pass
-            except mssql_python.Error:
-                pass
-        except mssql_python.Error:
-            # clear all pending result sets
-            try:
-                while curr.nextset():
-                    pass
-            except mssql_python.Error:
-                pass
-            # immediately rollback transaction
-            try:
-                self._conn.rollback()
-            except mssql_python.Error:
-                pass
-            raise
-        finally:
-            # clear all pending result sets
+            # Later statements in a batch may fail only when advancing to their results.
             while curr.nextset():
                 pass
-            # always close cursor
+        except BaseException as ex:
+            # close() discards pending results. Do not execute more of a failed batch or
+            # let cleanup failures replace an execution, fetch or consumer exception.
+            with suppress(mssql_python.Error):
+                curr.close()
+            if isinstance(ex, mssql_python.Error):
+                with suppress(mssql_python.Error):
+                    self._conn.rollback()
+            raise
+        else:
             curr.close()
 
     @classmethod
     def _make_database_exception(cls, ex: Exception) -> Exception:
+        if not isinstance(ex, mssql_python.Error):
+            return ex
         # mssql-python maps the SQLSTATE to a stable `driver_error` label, which we classify on
         # (the ddbc_error message is server/locale dependent, the label is not).
-        driver_error = getattr(ex, "driver_error", "")
+        driver_error = ex.driver_error
         if isinstance(ex, mssql_python.ProgrammingError):
             if driver_error == "Base table or view not found":  # SQLSTATE 42S02
                 return DatabaseUndefinedRelation(ex)
             if driver_error == "Syntax error or access violation":  # SQLSTATE 42000
-                msg = str(ex)
-                if "(15151)" in msg or "does not exist" in msg:
+                # The driver may omit native error 15151, leaving only the server message.
+                msg = ex.ddbc_error.lower()
+                if (
+                    "(15151)" in msg
+                    or "because it does not exist or you do not have permission" in msg
+                ):
                     return DatabaseUndefinedRelation(ex)
                 return DatabaseTerminalException(ex)
             if driver_error == "COUNT field incorrect":  # SQLSTATE 07002, wrong parameter count
