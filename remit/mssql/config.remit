@@ -1,0 +1,128 @@
+context mssql_config
+  layer  configuration
+  intent "Turn the credentials a user configured for mssql, synapse or fabric into what the driver connects with"
+
+exposes external odbc_driver_manager : system  "unixODBC or the Windows ODBC manager, with the msodbcsql drivers installed on the machine"
+  because "credential resolution, the sql client and ibis each read it on their own"
+exposes external entra_id            : network "Microsoft Entra ID token endpoints"
+  because "the driver signs in there when the connection string names an Entra ID method"
+
+failure ConfigFieldMissing   "a required credential field is not configured"
+failure UnsupportedDriver    "the configured ODBC driver name is not one dlt supports"
+failure NoSupportedDriver    "no supported ODBC driver is installed on the machine"
+failure MissingAzureIdentity "azure-identity is not installed"
+
+concept ConfiguredValue "a connection string, a dict or explicit fields, from code, config.toml, secrets.toml or env"
+
+exposes concept MsSqlCredentials "host, port, database, username, password, driver, connect_timeout and a free-form query table"
+  state parsed
+    query_lowercased:    every query key is lowercased
+    timeout_read:        connect_timeout is read from the query, the key stays in the query
+  state with_driver extends parsed
+    driver_set:          driver names an ODBC driver, configured or discovered
+  state resolved extends with_driver
+    driver_supported:    driver is one of SUPPORTED_DRIVERS of the credentials class
+    required_present:    host, database, username and password are set
+    database_lowercased: database is lowercased
+
+exposes concept FabricCredentials "host, port, database, connect_timeout and the azure service principal fields; no username, password, driver or query"
+  state resolved
+    sp_or_default:           either azure_client_id, azure_client_secret and azure_tenant_id are all set, or a DefaultAzureCredential is attached
+    fabric_required_present: host and database are set
+
+exposes concept DsnParams "ODBC keyword to value mapping that pyodbc receives"
+  state from_credentials
+    fields_first:    DRIVER, SERVER (host,port), DATABASE, UID and PWD come from the credential fields
+    query_overrides: every query key is upper-cased and copied in after the fields, so it overrides them
+    unknown_kept:    query keys the ODBC driver does not know are kept, the driver ignores them
+
+exposes concept OdbcDsn "a semicolon separated ODBC connection string"
+  state escaped
+    values_braced: values containing ; or } are wrapped in braces with } doubled
+
+exposes does resolve_mssql_credentials
+  intent  "Resolve MsSqlCredentials or SynapseCredentials, its subclass, from config"
+  takes   value: ConfiguredValue
+  gives   MsSqlCredentials@resolved
+  fails   ConfigFieldMissing, UnsupportedDriver, NoSupportedDriver
+  steps
+    parse_mssql_native_value value -> creds
+    discover_odbc_driver     creds -> creds
+    validate_mssql_fields    creds -> MsSqlCredentials@resolved
+
+does parse_mssql_native_value
+  intent  "parse_native_representation: url fields, query lowercased, driver and connect_timeout read from the query"
+  takes   ConfiguredValue
+  gives   MsSqlCredentials@parsed
+
+does discover_odbc_driver
+  intent  "on_partial: keep the configured driver, otherwise pick the first supported driver pyodbc.drivers() lists"
+  takes   MsSqlCredentials@parsed
+  gives   MsSqlCredentials@with_driver
+  effects reads odbc_driver_manager
+  fails   NoSupportedDriver
+
+does validate_mssql_fields
+  intent  "on_resolved: check the driver against SUPPORTED_DRIVERS (driver 18 only for SynapseCredentials), require the fields, lowercase the database"
+  takes   MsSqlCredentials@with_driver
+  gives   MsSqlCredentials@resolved
+  fails   ConfigFieldMissing, UnsupportedDriver
+
+exposes does mssql_dsn_params
+  intent  "get_odbc_dsn_dict: shared by the sql client and the ADBC parquet job"
+  takes   creds: MsSqlCredentials@resolved
+  gives   DsnParams@from_credentials
+  steps
+    fields_and_query_params creds  -> params
+    when creds are SynapseCredentials
+      force_long_as_max     params -> params
+    give params
+
+does fields_and_query_params
+  takes   MsSqlCredentials@resolved
+  gives   DsnParams@from_credentials
+
+does force_long_as_max
+  intent  "Synapse rejects text/ntext; LONGASMAX=yes makes the ODBC 18 driver bind long values as max types"
+  takes   DsnParams@from_credentials
+  gives   DsnParams@from_credentials
+
+exposes does build_odbc_dsn
+  intent  "Join DsnParams into a connection string, skipping None values and writing empty values as KEY="
+  takes   DsnParams
+  gives   OdbcDsn@escaped
+
+exposes does mssql_to_odbc_dsn
+  intent  "to_odbc_dsn of MsSqlCredentials and SynapseCredentials"
+  takes   creds: MsSqlCredentials@resolved
+  gives   OdbcDsn@escaped
+  steps
+    mssql_dsn_params creds  -> params
+    build_odbc_dsn   params -> OdbcDsn@escaped
+
+exposes does resolve_fabric_credentials
+  intent  "Resolve FabricCredentials from config"
+  takes   value: ConfiguredValue
+  gives   FabricCredentials@resolved
+  fails   ConfigFieldMissing, MissingAzureIdentity
+  steps
+    parse_fabric_native_value       value -> creds
+    attach_default_azure_credential creds -> FabricCredentials@resolved
+
+does parse_fabric_native_value
+  takes   ConfiguredValue
+  gives   FabricCredentials
+  fails   ConfigFieldMissing
+
+does attach_default_azure_credential
+  intent  "on_partial: without a full service principal, attach DefaultAzureCredential()"
+  takes   FabricCredentials
+  gives   FabricCredentials@resolved
+  fails   MissingAzureIdentity
+  because "nothing on the connection path reads the attached credential: the DSN still says ActiveDirectoryServicePrincipal without UID/PWD"
+
+exposes does fabric_to_odbc_dsn
+  intent  "to_odbc_dsn of FabricCredentials: hard-coded driver 18, ActiveDirectoryServicePrincipal, LongAsMax, Encrypt; UID/PWD only with a full service principal"
+  takes   FabricCredentials@resolved
+  gives   OdbcDsn
+  because "joins values without escaping, a client secret containing ; or } breaks the connection string"

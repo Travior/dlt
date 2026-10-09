@@ -1,0 +1,23 @@
+context mssql_integrations
+  layer  integration
+  intent "Hand the same credentials to ibis and dbt, which connect with their own drivers"
+
+external ibis_mssql    : library "ibis mssql backend, which connects through pyodbc and a system ODBC driver"
+external dbt_sqlserver : library "dbt-sqlserver, dbt-synapse and dbt-fabric adapters, which connect through pyodbc"
+
+concept IbisBackend "an ibis backend connected to the destination dataset"
+concept DbtProfile  "dbt profile rendered from DLT__CREDENTIALS__* environment variables"
+
+exposes does create_mssql_ibis_backend
+  intent  "ibis.connect(credentials url with synapse:// rewritten to mssql://, driver=credentials.driver)"
+  takes   creds: mssql_config.MsSqlCredentials@resolved
+  gives   IbisBackend
+  effects reads mssql_config.odbc_driver_manager, ibis_mssql
+  because "relies on driver_set from credential resolution"
+
+exposes does render_mssql_dbt_profile
+  intent  "add_config_to_env exports every credential field, profiles.yml reads DLT__CREDENTIALS__DRIVER without a default"
+  takes   creds: mssql_config.MsSqlCredentials@resolved
+  gives   DbtProfile
+  effects reads dbt_sqlserver
+  because "relies on driver_set from credential resolution"
