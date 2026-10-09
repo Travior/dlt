@@ -20,7 +20,7 @@ exposes does mssql_connect
   intent  "PyOdbcMsSqlClient.open_connection for the mssql and synapse destinations"
   takes   creds: mssql_config.MsSqlCredentials@resolved, timeout: mssql_client.ConnectionTimeout
   gives   mssql_client.Connection@ready
-  fails   mssql_client.DatabaseTransientException, mssql_client.DatabaseTerminalException
+  fails   UnsupportedConnectionKeyword, DatabaseTransientException, DatabaseTerminalException
   steps
     mssql_config.mssql_to_odbc_dsn creds        -> dsn
     mssql_client.open_connection   dsn, timeout -> mssql_client.Connection@ready
@@ -29,7 +29,7 @@ exposes does fabric_connect
   intent  "FabricSqlClient.open_connection: the same client, given FabricCredentials it duck-types as MsSqlCredentials"
   takes   creds: mssql_config.FabricCredentials@resolved, timeout: mssql_client.ConnectionTimeout
   gives   mssql_client.Connection@ready
-  fails   mssql_client.DatabaseTransientException, mssql_client.DatabaseTerminalException
+  fails   UnsupportedConnectionKeyword, DatabaseTransientException, DatabaseTerminalException
   steps
     mssql_config.fabric_to_odbc_dsn creds        -> dsn
     mssql_client.open_connection    dsn, timeout -> mssql_client.Connection@ready

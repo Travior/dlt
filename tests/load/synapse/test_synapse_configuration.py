@@ -1,9 +1,9 @@
 import os
 
 import pytest
+from mssql_python.connection_string_parser import _ConnectionStringParser
 
 from dlt.common.configuration import resolve_configuration
-from dlt.common.exceptions import SystemConfigurationException
 from dlt.common.schema import Schema
 from dlt.common.utils import digest128
 from dlt.destinations import synapse
@@ -82,33 +82,17 @@ def test_synapse_factory() -> None:
     assert client.capabilities.casefold_identifier is str
 
 
-def test_parse_native_representation() -> None:
-    # Case: unsupported driver specified.
-    with pytest.raises(SystemConfigurationException):
-        resolve_configuration(
-            SynapseCredentials(
-                "synapse://test_user:test_pwd@test.sql.azuresynapse.net/test_db?DRIVER=ODBC+Driver+17+for+SQL+Server"
-            )
-        )
-
-
-def test_to_odbc_dsn_longasmax() -> None:
-    # Case: LONGASMAX not specified in query (this is the expected scenario).
+def test_to_odbc_dsn_without_longasmax() -> None:
+    # mssql-python binds long values as max types, LongAsMax is not needed and not accepted
     creds = resolve_configuration(
         SynapseCredentials(
-            "synapse://test_user:test_pwd@test.sql.azuresynapse.net/test_db?DRIVER=ODBC+Driver+18+for+SQL+Server"
+            "synapse://test_user:test_pwd@test.sql.azuresynapse.net/test_db?DRIVER=ODBC+Driver+17+for+SQL+Server&LONGASMAX=no&Encrypt=yes"
         )
     )
-    dsn = creds.to_odbc_dsn()
-    result = {k: v for k, v in (param.split("=") for param in dsn.split(";"))}
-    assert result["LONGASMAX"] == "yes"
-
-    # Case: LONGASMAX specified in query; specified value should be overridden.
-    creds = resolve_configuration(
-        SynapseCredentials(
-            "synapse://test_user:test_pwd@test.sql.azuresynapse.net/test_db?DRIVER=ODBC+Driver+18+for+SQL+Server&LONGASMAX=no"
-        )
-    )
-    dsn = creds.to_odbc_dsn()
-    result = {k: v for k, v in (param.split("=") for param in dsn.split(";"))}
-    assert result["LONGASMAX"] == "yes"
+    assert _ConnectionStringParser(validate_keywords=True)._parse(creds.to_odbc_dsn()) == {
+        "server": "test.sql.azuresynapse.net,1433",
+        "database": "test_db",
+        "uid": "test_user",
+        "pwd": "test_pwd",
+        "encrypt": "yes",
+    }

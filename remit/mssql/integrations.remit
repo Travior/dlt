@@ -9,15 +9,40 @@ concept IbisBackend "an ibis backend connected to the destination dataset"
 concept DbtProfile  "dbt profile rendered from DLT__CREDENTIALS__* environment variables"
 
 exposes does create_mssql_ibis_backend
-  intent  "ibis.connect(credentials url with synapse:// rewritten to mssql://, driver=credentials.driver)"
+  intent  "ibis.connect(credentials url with synapse:// rewritten to mssql://, driver=discovered driver)"
   takes   creds: mssql_config.MsSqlCredentials@resolved
   gives   IbisBackend
-  effects reads mssql_config.odbc_driver_manager, ibis_mssql
-  because "relies on driver_set from credential resolution"
+  effects reads pyodbc_drivers, ibis_mssql
+  fails   NoInstalledDriver
+  because "ibis keeps connecting through pyodbc and a system ODBC driver"
+  steps
+    discover_odbc_driver creds         -> driver
+    ibis_mssql_connect   creds, driver -> IbisBackend
 
 exposes does render_mssql_dbt_profile
-  intent  "add_config_to_env exports every credential field, profiles.yml reads DLT__CREDENTIALS__DRIVER without a default"
+  intent  "add_config_to_env exports every credential field, profiles.yml falls back to ODBC Driver 18 when no driver is configured"
   takes   creds: mssql_config.MsSqlCredentials@resolved
   gives   DbtProfile
   effects reads dbt_sqlserver
-  because "relies on driver_set from credential resolution"
+  because "dbt adapters keep connecting through pyodbc and a system ODBC driver"
+
+external pyodbc_drivers : system "unixODBC or the Windows ODBC manager, with the msodbcsql drivers installed on the machine"
+
+failure NoInstalledDriver "no supported ODBC driver is installed on the machine"
+
+concept OdbcDriverName "the name of an installed ODBC driver, for clients that still connect through pyodbc"
+
+does discover_odbc_driver
+  intent  "the configured driver, otherwise the first supported driver pyodbc.drivers() lists"
+  takes   MsSqlCredentials@resolved
+  gives   OdbcDriverName
+  effects reads pyodbc_drivers
+  fails   NoInstalledDriver
+
+does ibis_mssql_connect
+  takes   MsSqlCredentials@resolved, OdbcDriverName
+  gives   IbisBackend
+  effects reads ibis_mssql
+
+rule only context mssql_integrations may read pyodbc_drivers
+  because "the destination connects with the driver mssql-python bundles; only clients that still use pyodbc need a system driver"

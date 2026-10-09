@@ -1,0 +1,177 @@
+change mssql-python-connector
+  applied-to "sha256:v1:62656e99d1457fe8b8d6f274f14eea3a20f02a52cbcf7eea10cbdfc0371dcb0c"
+  because    "connect through mssql-python, which bundles its ODBC driver, and translate pyodbc keywords in one place so existing configurations keep working"
+
+  add in mssql_config exposes failure UnsupportedConnectionKeyword "a configured pyodbc keyword whose effect mssql-python cannot provide, e.g. DSN or ColumnEncryption"
+    ! exposes UnsupportedConnectionKeyword
+
+  revise concept OdbcDsn
+    state accepted extends escaped
+      allowlisted:     only keywords mssql-python's parser accepts, in canonical spelling, each once
+      no_empty_values: keywords with empty values are left out
+
+  revise concept DsnParams
+    state translated
+      canonical_keys: only keywords mssql-python's parser accepts, in canonical spelling, each once
+      no_empty_keys:  keywords with empty values are left out
+
+  add in mssql_config does translate_pyodbc_keywords
+    intent  "One table from every documented ODBC Driver 17/18 keyword to its mssql-python spelling, to dropped (with a warning, unless the bundled driver already behaves that way) or to rejected"
+    takes   DsnParams
+    gives   DsnParams@translated
+    fails   UnsupportedConnectionKeyword
+    because "pyodbc ignored keywords the driver does not know and mssql-python rejects them, so unknown keys are dropped with a warning; keys that change what is read or where it is read from are rejected"
+
+  add in mssql_config does keep_driver17_encryption
+    intent  "Encrypt=no when ODBC Driver 17 is configured and Encrypt is not, with a deprecation warning"
+    takes   DsnParams@translated
+    gives   DsnParams@translated
+    because "driver 17 did not encrypt by default, the bundled driver 18 requires a trusted certificate by default"
+
+  add in mssql_config does build_accepted_dsn variant of build_odbc_dsn
+    takes   DsnParams@translated
+    gives   OdbcDsn@accepted
+    adds    allowlisted, no_empty_values
+    because "the same escaping, applied to keywords the translation already checked"
+
+  add in mssql_config does map_pyodbc_keywords
+    intent  "Turn pyodbc keywords into a connection string mssql-python accepts"
+    takes   params: DsnParams
+    gives   OdbcDsn@accepted
+    fails   UnsupportedConnectionKeyword
+    steps
+      translate_pyodbc_keywords  params   -> keywords
+      when params name ODBC Driver 17 and keywords have no Encrypt
+        keep_driver17_encryption keywords -> keywords
+      build_accepted_dsn         keywords -> OdbcDsn@accepted
+
+  add in mssql_config rule only translate_pyodbc_keywords, keep_driver17_encryption may give DsnParams@translated
+    because "every connection string mssql-python sees went through the one keyword table"
+
+  revise mssql_to_odbc_dsn
+    gives   OdbcDsn@accepted
+    fails   UnsupportedConnectionKeyword
+    steps
+      mssql_dsn_params    creds  -> params
+      map_pyodbc_keywords params -> OdbcDsn@accepted
+    ! changes mssql_to_odbc_dsn
+
+  revise mssql_dsn_params
+    because "mssql-python binds long str and bytes as max types, so Synapse no longer needs LongAsMax"
+    steps
+      fields_and_query_params creds -> DsnParams@from_credentials
+    ! changes mssql_dsn_params
+  remove force_long_as_max
+
+  add in mssql_config does fabric_dsn_params
+    intent  "get_odbc_dsn_dict of FabricCredentials"
+    takes   FabricCredentials@resolved
+    gives   DsnParams
+
+  revise fabric_to_odbc_dsn
+    takes   creds: FabricCredentials@resolved
+    gives   OdbcDsn@accepted
+    fails   UnsupportedConnectionKeyword
+    because "the same keyword map escapes the Fabric connection string"
+    steps
+      fabric_dsn_params   creds  -> params
+      map_pyodbc_keywords params -> OdbcDsn@accepted
+    ! changes fabric_to_odbc_dsn
+
+  revise mssql_connect
+    fails   UnsupportedConnectionKeyword, DatabaseTransientException, DatabaseTerminalException
+
+  revise fabric_connect
+    fails   UnsupportedConnectionKeyword, DatabaseTransientException, DatabaseTerminalException
+
+  add in mssql_client does mssql_python_connect
+    intent  "mssql_python.connect(dsn, timeout=connect_timeout, autocommit=True, native_uuid=False)"
+    takes   OdbcDsn@accepted, ConnectionTimeout
+    gives   Connection@ready
+    effects reads entra_id, reads/writes sql_server
+    fails   DatabaseTransientException, DatabaseTerminalException
+    because "the bundled driver decodes datetimeoffset as tz-aware datetime; native_uuid=False keeps uniqueidentifier as str"
+
+  revise open_connection
+    intent  "mssql_python.connect with the connection string the keyword map produced"
+    takes   dsn: OdbcDsn@accepted, timeout: ConnectionTimeout
+    steps
+      mssql_python_connect dsn, timeout -> Connection@ready
+    ! changes open_connection
+  remove pyodbc_connect
+  remove register_datetimeoffset_converter
+
+  add in mssql_client does classify_mssql_python_error
+    intent  "_make_database_exception: reads the SQLSTATE from the mssql-python exception class and driver_error, greps the message for missing objects"
+    takes   Connection@ready
+    gives   nothing
+    fails   DatabaseTransientException, DatabaseUndefinedRelation
+    because "mssql-python exposes no SQLSTATE or native error number attribute; the same SQLSTATE groups map to the same dlt exceptions as before"
+  replace in execute_query steps classify_pyodbc_error
+    with classify_mssql_python_error conn
+    ! changes execute_query
+  remove classify_pyodbc_error
+
+  revise rollback_transaction
+    intent  "rollback, swallowing Synapse's 'no corresponding transaction found' found by its message text"
+
+  revise run_cursor
+    intent  "cursor.execute(query, *args) with %s rewritten to ?, fetch, then nextset() until exhausted and close"
+
+  revise validate_mssql_fields
+    intent  "on_resolved: require the fields and lowercase the database; a configured driver is kept for ibis and dbt"
+    takes   MsSqlCredentials@parsed
+    fails   ConfigFieldMissing
+    ! changes validate_mssql_fields
+
+  revise resolve_mssql_credentials
+    fails   ConfigFieldMissing
+    steps
+      parse_mssql_native_value value -> creds
+      validate_mssql_fields    creds -> MsSqlCredentials@resolved
+    ! changes resolve_mssql_credentials
+
+  add in mssql_integrations external pyodbc_drivers : system "unixODBC or the Windows ODBC manager, with the msodbcsql drivers installed on the machine"
+  add in mssql_integrations failure NoInstalledDriver "no supported ODBC driver is installed on the machine"
+  add in mssql_integrations concept OdbcDriverName "the name of an installed ODBC driver, for clients that still connect through pyodbc"
+  revise discover_odbc_driver
+    intent  "the configured driver, otherwise the first supported driver pyodbc.drivers() lists"
+    takes   MsSqlCredentials@resolved
+    gives   OdbcDriverName
+    effects reads pyodbc_drivers
+    fails   NoInstalledDriver
+    ! changes discover_odbc_driver
+  move discover_odbc_driver to context mssql_integrations
+
+  add in mssql_integrations does ibis_mssql_connect
+    takes   MsSqlCredentials@resolved, OdbcDriverName
+    gives   IbisBackend
+    effects reads ibis_mssql
+  revise create_mssql_ibis_backend
+    intent  "ibis.connect(credentials url with synapse:// rewritten to mssql://, driver=discovered driver)"
+    effects reads pyodbc_drivers, ibis_mssql
+    fails   NoInstalledDriver
+    because "ibis keeps connecting through pyodbc and a system ODBC driver"
+    steps
+      discover_odbc_driver creds         -> driver
+      ibis_mssql_connect   creds, driver -> IbisBackend
+    ! changes create_mssql_ibis_backend
+
+  revise render_mssql_dbt_profile
+    intent  "add_config_to_env exports every credential field, profiles.yml falls back to ODBC Driver 18 when no driver is configured"
+    because "dbt adapters keep connecting through pyodbc and a system ODBC driver"
+
+  revise concept MsSqlCredentials
+    state resolved extends parsed
+      required_present:    host, database, username and password are set
+      database_lowercased: database is lowercased
+    ! weakens MsSqlCredentials@resolved
+  remove state MsSqlCredentials@with_driver
+
+  remove UnsupportedDriver
+  remove NoSupportedDriver
+  remove odbc_driver_manager
+    ! removes odbc_driver_manager
+
+  add in mssql_integrations rule only context mssql_integrations may read pyodbc_drivers
+    because "the destination connects with the driver mssql-python bundles; only clients that still use pyodbc need a system driver"
