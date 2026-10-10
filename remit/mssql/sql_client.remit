@@ -2,7 +2,7 @@ context mssql_client
   layer  driver
   intent "Run dlt's SQL against SQL Server, Synapse and Fabric over one DB-API connection per sql client"
 
-exposes external sql_server : network "the SQL Server, Synapse or Fabric endpoint"
+external sql_server : network "the SQL Server, Synapse or Fabric endpoint"
   because "the ADBC parquet job opens its own connection to it"
 
 exposes failure DatabaseTransientException "a database error a retry may fix"
@@ -100,3 +100,19 @@ does classify_mssql_python_error
   gives   nothing
   fails   DatabaseTransientException, DatabaseUndefinedRelation
   because "mssql-python exposes no SQLSTATE or native error number attribute; the same SQLSTATE groups map to the same dlt exceptions as before"
+
+exposes concept ArrowStream "record batches streamed from a parquet file"
+
+exposes concept CopiedRows "the rows of one load file bulk copied into its table"
+  state atomic
+    single_batch:  copied in one bulk batch, so a failure commits nothing and a retried job cannot duplicate a prefix
+    by_name:       source columns are mapped to table columns by name
+    count_checked: rows_copied equals the rows in the file
+
+exposes does bulk_copy_arrow
+  intent  "cursor.bulkcopy_arrow(qualified table, stream, batch_size=0, timeout=0, column_mappings by name, keep_nulls=True), then compare rows_copied with the stream's row count"
+  takes   Connection@ready, ArrowStream
+  gives   CopiedRows@atomic
+  effects reads mssql_config.entra_id, writes sql_server
+  fails   DatabaseTransientException, DatabaseTerminalException
+  because "bulk copy opens its own native connection from the connection's string and authentication, outside any open transaction; Authentication methods it cannot perform fail as terminal before copying"

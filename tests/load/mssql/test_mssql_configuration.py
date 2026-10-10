@@ -28,7 +28,7 @@ def test_mssql_factory() -> None:
     assert client.capabilities.has_case_sensitive_identifiers is False
     assert client.capabilities.casefold_identifier is str
 
-    # MSSQL uses ADBC for parquet loading which doesn't support dictionary-encoded arrays
+    # dictionary-encoded arrays are not verified with bulk copy
     assert client.capabilities.parquet_format is not None
     assert client.capabilities.parquet_format.supports_dictionary_encoding is False
 
