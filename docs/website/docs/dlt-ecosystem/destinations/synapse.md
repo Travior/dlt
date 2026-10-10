@@ -102,37 +102,19 @@ pipeline = dlt.pipeline(
 )
 ```
 
-To use **Active Directory Principal**, you can use the `sqlalchemy.engine.URL.create` method to create the connection URL using your Active Directory Service Principal credentials. First, create the connection string as:
+To sign in with a **Microsoft Entra ID service principal**, set `authentication`, with the client id as `username` and the
+client secret as `password`:
 
-```py
-conn_str = (
-    "DRIVER={ODBC Driver 18 for SQL Server};"
-    "SERVER={SERVER_NAME};"
-    "DATABASE={DATABASE_NAME};"
-    "UID={SERVICE_PRINCIPAL_ID}@{TENANT_ID};"
-    "PWD={SERVICE_PRINCIPAL_SECRETS};"
-    "Authentication=ActiveDirectoryServicePrincipal"
-)
+```toml
+[destination.synapse.credentials]
+database = "yourpool"
+host = "your_synapse_workspace_name.sql.azuresynapse.net"
+username = "<client id>"
+password = "<client secret>"
+authentication = "ActiveDirectoryServicePrincipal"
 ```
 
-Create the connection URL, which you can use directly in your pipeline configuration or convert to a string.
-
-```py
-from sqlalchemy.engine import URL
-
-connection_url = URL.create(
-    "mssql+pyodbc",
-    query={"odbc_connect": "..."}
-)
-
-pipeline = dlt.pipeline(
-    pipeline_name='chess',
-    destination=dlt.destinations.synapse(
-        credentials=connection_url.render_as_string(hide_password=False)
-    ),
-    dataset_name='chess_data'
-)
-```
+The `synapse` destination supports the same [Microsoft Entra ID authentication](mssql.md#microsoft-entra-id-authentication) methods as `mssql`.
 
 ## Write disposition
 

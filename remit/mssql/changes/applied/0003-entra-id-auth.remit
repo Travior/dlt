@@ -1,0 +1,69 @@
+change entra-id-auth
+  applied-to "sha256:v1:f707a57a2c4e52a1f4f17a3faff566028279798ee04cf2e5332a302e2141e769"
+  because    "let mssql, synapse and fabric sign in with Microsoft Entra ID through mssql-python, and make Fabric use the credential dlt already resolves for it"
+
+  add in mssql_config exposes concept TokenProvider "an azure-identity TokenCredential the driver asks for a token on every connect, or none"
+    ! exposes TokenProvider
+  add in mssql_config failure InvalidAuthentication "an unknown authentication method, or authentication settings that cannot be used together"
+
+  revise concept MsSqlCredentials
+    state resolved extends parsed
+      required_present:    host and database are set, and username and password for SQL logins, ActiveDirectoryPassword and ActiveDirectoryServicePrincipal unless Trusted_Connection or an azure_credential is set
+      known_method:        authentication is empty (SQL login) or a method mssql-python or its bundled driver performs
+      not_mixed:           an azure_credential comes without authentication, username, password or an Authentication, UID, PWD or Trusted_Connection query key
+      database_lowercased: database is lowercased
+    ! changes MsSqlCredentials@resolved
+
+  revise validate_mssql_fields
+    intent  "on_partial: resolve without username and password when the authentication method needs no login; on_resolved: reject unknown methods and an azure_credential mixed with other sign-in settings, lowercase the database"
+    fails   ConfigFieldMissing, InvalidAuthentication
+    ! weakens validate_mssql_fields
+
+  revise resolve_mssql_credentials
+    fails   ConfigFieldMissing, InvalidAuthentication
+
+  revise fields_and_query_params
+    intent  "get_odbc_dsn_dict: SERVER, DATABASE, AUTHENTICATION from the authentication field, UID and PWD, then the query keys"
+
+  revise fabric_dsn_params
+    intent  "get_odbc_dsn_dict of FabricCredentials: ActiveDirectoryServicePrincipal with UID and PWD only for a full service principal"
+
+  revise attach_default_azure_credential
+    because "fabric_token_provider hands the attached credential to the driver"
+
+  add in mssql_config exposes does mssql_token_provider
+    intent  "token_provider(): the azure_credential set in code, or none"
+    takes   MsSqlCredentials@resolved
+    gives   TokenProvider
+    ! exposes mssql_token_provider
+
+  add in mssql_config exposes does fabric_token_provider
+    intent  "token_provider(): the azure_credential set in code, otherwise the attached DefaultAzureCredential when the service principal is incomplete, or none"
+    takes   FabricCredentials@resolved
+    gives   TokenProvider
+    ! exposes fabric_token_provider
+
+  revise mssql_python_connect
+    intent  "mssql_python.connect(dsn, timeout=connect_timeout, autocommit=True, native_uuid=False, token_provider=provider)"
+    takes   mssql_config.OdbcDsn@accepted, ConnectionTimeout, mssql_config.TokenProvider
+    ! changes mssql_python_connect
+
+  revise open_connection
+    takes   dsn: mssql_config.OdbcDsn@accepted, timeout: ConnectionTimeout, provider: mssql_config.TokenProvider
+    steps
+      mssql_python_connect dsn, timeout, provider -> Connection@ready
+    ! changes open_connection
+
+  revise mssql_connect
+    steps
+      mssql_config.mssql_to_odbc_dsn    creds                  -> dsn
+      mssql_config.mssql_token_provider creds                  -> provider
+      mssql_client.open_connection      dsn, timeout, provider -> mssql_client.Connection@ready
+    ! changes mssql_connect
+
+  revise fabric_connect
+    steps
+      mssql_config.fabric_to_odbc_dsn    creds                  -> dsn
+      mssql_config.fabric_token_provider creds                  -> provider
+      mssql_client.open_connection       dsn, timeout, provider -> mssql_client.Connection@ready
+    ! changes fabric_connect

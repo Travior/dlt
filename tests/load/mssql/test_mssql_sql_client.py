@@ -76,7 +76,23 @@ def test_open_connection(monkeypatch: pytest.MonkeyPatch) -> None:
         "autocommit": True,
         "timeout": 30,
         "native_uuid": False,
+        "token_provider": None,
     }
+
+
+def test_open_connection_with_azure_credential(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: Dict[str, Any] = {}
+    monkeypatch.setattr(
+        mssql_python, "connect", lambda connection_str, **kwargs: calls.update(kwargs)
+    )
+    credential = object()
+    credentials = MsSqlCredentials()
+    credentials.host = "sql.example.com"
+    credentials.database = "db"
+    credentials.azure_credential = credential
+    credentials = resolve_configuration(credentials)
+    PyOdbcMsSqlClient("dataset", None, credentials, mssql().capabilities()).open_connection()
+    assert calls["token_provider"] is credential
 
 
 class _Connection:

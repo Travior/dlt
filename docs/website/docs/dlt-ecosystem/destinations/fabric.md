@@ -25,9 +25,9 @@ This will install `dlt` with the `mssql` extra, which contains all the dependenc
 bundles the _ODBC Driver 18 for SQL Server_, so you don't need to install an ODBC driver on your system.
 [dbt](#dbt-support) still connects through `pyodbc` and needs the driver installed on your system.
 
-### Service Principal Authentication
+### Authentication
 
-Fabric Warehouse requires Azure Active Directory Service Principal authentication. You'll need:
+Fabric Warehouse signs in with Microsoft Entra ID. With a service principal you'll need:
 
 1. **Tenant ID**: Your Azure AD tenant ID (GUID)
 2. **Client ID**: Application (service principal) client ID (GUID)
@@ -40,6 +40,37 @@ Fabric Warehouse requires Azure Active Directory Service Principal authenticatio
 - In the Fabric portal, go to your warehouse **Settings**
 - Select **SQL endpoint**
 - Copy the **SQL connection string** - it should be in the format: `<guid>.datawarehouse.fabric.microsoft.com`
+
+If you don't configure the service principal, `dlt` signs in with
+[DefaultAzureCredential](https://learn.microsoft.com/en-us/python/api/azure-identity/azure.identity.defaultazurecredential),
+which tries environment variables, a managed identity and the Azure CLI login, among others.
+
+To sign in as any other identity, pass an azure-identity `TokenCredential` in code. For example, inside a Fabric notebook you can
+get tokens for the identity the notebook runs as:
+
+```py notype
+import time
+
+import dlt
+from azure.core.credentials import AccessToken
+from dlt.destinations.impl.fabric.configuration import FabricCredentials
+
+
+class NotebookCredential:
+    def get_token(self, *scopes: str, **kwargs: object) -> AccessToken:
+        import notebookutils  # available inside Fabric notebooks
+
+        token = notebookutils.credentials.getToken("https://database.windows.net/")
+        # notebookutils does not return the expiry, refresh well before tokens expire
+        return AccessToken(token, int(time.time()) + 600)
+
+
+credentials = FabricCredentials()
+credentials.host = "<your-warehouse-guid>.datawarehouse.fabric.microsoft.com"
+credentials.database = "mydb"
+credentials.azure_credential = NotebookCredential()
+pipeline = dlt.pipeline(destination=dlt.destinations.fabric(credentials=credentials))
+```
 
 ### Create a pipeline
 

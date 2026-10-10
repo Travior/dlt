@@ -14,8 +14,9 @@ exposes does mssql_connect
   gives   mssql_client.Connection@ready
   fails   UnsupportedConnectionKeyword, DatabaseTransientException, DatabaseTerminalException
   steps
-    mssql_config.mssql_to_odbc_dsn creds        -> dsn
-    mssql_client.open_connection   dsn, timeout -> mssql_client.Connection@ready
+    mssql_config.mssql_to_odbc_dsn    creds                  -> dsn
+    mssql_config.mssql_token_provider creds                  -> provider
+    mssql_client.open_connection      dsn, timeout, provider -> mssql_client.Connection@ready
 
 exposes does fabric_connect
   intent  "FabricSqlClient.open_connection: the same client, given FabricCredentials it duck-types as MsSqlCredentials"
@@ -23,8 +24,9 @@ exposes does fabric_connect
   gives   mssql_client.Connection@ready
   fails   UnsupportedConnectionKeyword, DatabaseTransientException, DatabaseTerminalException
   steps
-    mssql_config.fabric_to_odbc_dsn creds        -> dsn
-    mssql_client.open_connection    dsn, timeout -> mssql_client.Connection@ready
+    mssql_config.fabric_to_odbc_dsn    creds                  -> dsn
+    mssql_config.fabric_token_provider creds                  -> provider
+    mssql_client.open_connection       dsn, timeout, provider -> mssql_client.Connection@ready
 
 exposes does select_mssql_loader_formats
   intent  "loader_file_format_selector of mssql: offer parquet when pyarrow is installed"

@@ -5,7 +5,8 @@ from typing import ClassVar, Any, Final, List, Dict, Optional, Tuple
 from dlt.common.configuration import configspec
 from dlt.common.configuration.exceptions import ConfigurationValueError
 from dlt.common.configuration.specs import ConnectionStringCredentials
-from dlt.common.typing import TSecretStrValue
+from dlt.common.configuration.specs.base_configuration import NotResolved
+from dlt.common.typing import Annotated, TSecretStrValue
 from dlt.common.warnings import DltDeprecationWarning
 
 from dlt.common.destination.client import DestinationClientDwhWithStagingConfiguration
@@ -96,6 +97,28 @@ UNSUPPORTED_PYODBC_KEYWORDS: Dict[str, Tuple[str, ...]] = {
 }
 """Keywords mssql-python cannot honor. Dropping them would change what is read or where it is
 read from, so they are rejected unless set to the listed values, which the bundled driver uses"""
+
+
+AUTHENTICATION_METHODS: Tuple[str, ...] = (
+    "SqlPassword",
+    "ActiveDirectoryPassword",
+    "ActiveDirectoryServicePrincipal",
+    "ActiveDirectoryIntegrated",
+    "ActiveDirectoryInteractive",
+    "ActiveDirectoryDeviceCode",
+    "ActiveDirectoryDefault",
+    "ActiveDirectoryMsi",
+)
+"""`Authentication` methods mssql-python or its bundled ODBC driver sign in with"""
+
+LOGIN_AUTHENTICATION_METHODS: Tuple[str, ...] = (
+    "",
+    "sqlpassword",
+    "activedirectorypassword",
+    "activedirectoryserviceprincipal",
+)
+"""Authentication methods (lowercased, empty for the default SQL login) that need a username
+and password"""
 
 
 def translate_pyodbc_keywords(params: Dict[str, Any]) -> Dict[str, str]:
@@ -191,6 +214,12 @@ class MsSqlCredentials(ConnectionStringCredentials):
     driver: Optional[str] = None
     """ODBC driver used by ibis and dbt, which connect through pyodbc. The destination connects
     with the ODBC Driver 18 bundled with mssql-python"""
+    authentication: Optional[str] = None
+    """Microsoft Entra ID `Authentication` method, one of `AUTHENTICATION_METHODS`. A SQL login
+    when not set"""
+    azure_credential: Annotated[Optional[Any], NotResolved()] = None
+    """An azure-identity `TokenCredential` the driver asks for an access token on every connect.
+    Set it in code instead of `authentication`, `username` and `password`"""
 
     __config_gen_annotations__: ClassVar[List[str]] = ["port", "connect_timeout"]
 
@@ -208,8 +237,58 @@ class MsSqlCredentials(ConnectionStringCredentials):
         self.driver = self.query.get("driver", self.driver)
         self.connect_timeout = int(self.query.get("connect_timeout", self.connect_timeout))
 
+    def on_partial(self) -> None:
+        # username and password are only needed to sign in with a login
+        if self.host and self.database and not self._needs_login():
+            self.resolve()
+
     def on_resolved(self) -> None:
+        method = self.authentication_method()
+        if method and method not in (m.lower() for m in AUTHENTICATION_METHODS):
+            raise ConfigurationValueError(
+                f"Unknown authentication method `{method}`. Use one of:"
+                f" {', '.join(AUTHENTICATION_METHODS)}."
+            )
+        query_method = self._query_value("authentication").lower()
+        if self.authentication and query_method and query_method != self.authentication.lower():
+            raise ConfigurationValueError(
+                "`authentication` and the `Authentication` query key name different methods."
+            )
+        if self.azure_credential is not None:
+            mixed = [
+                name
+                for name, value in (
+                    ("authentication", method),
+                    ("username", self.username),
+                    ("password", self.password),
+                    ("uid", self._query_value("uid")),
+                    ("pwd", self._query_value("pwd")),
+                    ("trusted_connection", self._query_value("trusted_connection")),
+                )
+                if value
+            ]
+            if mixed:
+                raise ConfigurationValueError(
+                    "`azure_credential` signs in on its own and cannot be combined with:"
+                    f" {', '.join(mixed)}."
+                )
         self.database = self.database.lower()
+
+    def authentication_method(self) -> str:
+        """Returns the lowercased `Authentication` method, empty for a SQL login."""
+        return (self.authentication or self._query_value("authentication")).lower()
+
+    def token_provider(self) -> Optional[Any]:
+        """Returns the `TokenCredential` the driver gets access tokens from, if any."""
+        return self.azure_credential
+
+    def _needs_login(self) -> bool:
+        if self.azure_credential is not None or self._query_value("trusted_connection"):
+            return False
+        return self.authentication_method() in LOGIN_AUTHENTICATION_METHODS
+
+    def _query_value(self, key: str) -> str:
+        return next((str(v) for k, v in (self.query or {}).items() if k.lower() == key and v), "")
 
     def get_query(self) -> Dict[str, Any]:
         query = dict(super().get_query())
@@ -221,6 +300,7 @@ class MsSqlCredentials(ConnectionStringCredentials):
             "DRIVER": self.driver,
             "SERVER": f"{self.host},{self.port}",
             "DATABASE": self.database,
+            "AUTHENTICATION": self.authentication,
             "UID": self.username,
             "PWD": self.password,
         }

@@ -100,6 +100,53 @@ destination.mssql.credentials="mssql://loader:loader@localhost/dlt_data?encrypt=
 destination.mssql.credentials="mssql://loader:loader@localhost/dlt_data?TrustServerCertificate=yes"
 ```
 
+### Microsoft Entra ID authentication
+
+Set `authentication` to sign in with Microsoft Entra ID instead of a SQL login. `mssql-python` gets the access tokens:
+
+```toml
+[destination.mssql.credentials]
+database = "dlt_data"
+host = "loader.database.windows.net"
+authentication = "ActiveDirectoryDefault"
+```
+
+| `authentication` | Signs in with | `username` and `password` |
+| --- | --- | --- |
+| `ActiveDirectoryDefault` | [DefaultAzureCredential](https://learn.microsoft.com/en-us/python/api/azure-identity/azure.identity.defaultazurecredential): environment variables, managed identity, Azure CLI and more | not needed |
+| `ActiveDirectoryServicePrincipal` | a service principal | client id and client secret |
+| `ActiveDirectoryPassword` | an Entra ID user and password | required |
+| `ActiveDirectoryMsi` | a managed identity | `username` is the client id of a user-assigned identity |
+| `ActiveDirectoryInteractive` | a browser login | `username` is an optional login hint |
+| `ActiveDirectoryDeviceCode` | a device code login | not needed |
+| `ActiveDirectoryIntegrated` | the Windows or Kerberos login of the process | not needed |
+| `SqlPassword` | a SQL login, like when `authentication` is not set | required |
+
+`Authentication` in the query string works as well. `trusted_connection=yes` signs in with the Windows or Kerberos login of the process,
+without `username` and `password`.
+
+To sign in with any other identity, pass an azure-identity `TokenCredential` in code. The driver asks it for a token on every connect,
+so long loads keep working when tokens expire:
+
+```py
+import dlt
+from azure.identity import ClientAssertionCredential
+from dlt.destinations.impl.mssql.configuration import MsSqlCredentials
+
+
+def get_assertion() -> str:
+    return "<a federated token, e.g. from GitHub Actions OIDC>"
+
+
+credentials = MsSqlCredentials()
+credentials.host = "loader.database.windows.net"
+credentials.database = "dlt_data"
+credentials.azure_credential = ClientAssertionCredential("<tenant id>", "<client id>", get_assertion)
+pipeline = dlt.pipeline(destination=dlt.destinations.mssql(credentials=credentials))
+```
+
+`azure_credential` can't be combined with `authentication`, `username`, `password` or the `UID`, `PWD` and `Trusted_Connection` query keys.
+
 ### Connection keywords
 
 `dlt` translates the keywords you configure to the ones `mssql-python` accepts:

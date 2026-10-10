@@ -14,7 +14,9 @@ exposes concept MsSqlCredentials "host, port, database, username, password, driv
     query_lowercased:    every query key is lowercased
     timeout_read:        connect_timeout is read from the query, the key stays in the query
   state resolved extends parsed
-    required_present:    host, database, username and password are set
+    required_present:    host and database are set, and username and password for SQL logins, ActiveDirectoryPassword and ActiveDirectoryServicePrincipal unless Trusted_Connection or an azure_credential is set
+    known_method:        authentication is empty (SQL login) or a method mssql-python or its bundled driver performs
+    not_mixed:           an azure_credential comes without authentication, username, password or an Authentication, UID, PWD or Trusted_Connection query key
     database_lowercased: database is lowercased
 
 exposes concept FabricCredentials "host, port, database, connect_timeout and the azure service principal fields; no username, password, driver or query"
@@ -42,7 +44,7 @@ exposes does resolve_mssql_credentials
   intent  "Resolve MsSqlCredentials or SynapseCredentials, its subclass, from config"
   takes   value: ConfiguredValue
   gives   MsSqlCredentials@resolved
-  fails   ConfigFieldMissing
+  fails   ConfigFieldMissing, InvalidAuthentication
   steps
     parse_mssql_native_value value -> creds
     validate_mssql_fields    creds -> MsSqlCredentials@resolved
@@ -53,10 +55,10 @@ does parse_mssql_native_value
   gives   MsSqlCredentials@parsed
 
 does validate_mssql_fields
-  intent  "on_resolved: require the fields and lowercase the database; a configured driver is kept for ibis and dbt"
+  intent  "on_partial: resolve without username and password when the authentication method needs no login; on_resolved: reject unknown methods and an azure_credential mixed with other sign-in settings, lowercase the database"
   takes   MsSqlCredentials@parsed
   gives   MsSqlCredentials@resolved
-  fails   ConfigFieldMissing
+  fails   ConfigFieldMissing, InvalidAuthentication
 
 does mssql_dsn_params
   intent  "get_odbc_dsn_dict: shared by the sql client and the ADBC parquet job"
@@ -67,6 +69,7 @@ does mssql_dsn_params
     fields_and_query_params creds -> DsnParams@from_credentials
 
 does fields_and_query_params
+  intent  "get_odbc_dsn_dict: SERVER, DATABASE, AUTHENTICATION from the authentication field, UID and PWD, then the query keys"
   takes   MsSqlCredentials@resolved
   gives   DsnParams@from_credentials
 
@@ -103,7 +106,7 @@ does attach_default_azure_credential
   takes   FabricCredentials
   gives   FabricCredentials@resolved
   fails   MissingAzureIdentity
-  because "nothing on the connection path reads the attached credential: the DSN still says ActiveDirectoryServicePrincipal without UID/PWD"
+  because "fabric_token_provider hands the attached credential to the driver"
 
 exposes does fabric_to_odbc_dsn
   intent  "to_odbc_dsn of FabricCredentials: hard-coded driver 18, ActiveDirectoryServicePrincipal, LongAsMax, Encrypt; UID/PWD only with a full service principal"
@@ -151,6 +154,20 @@ rule only translate_pyodbc_keywords, keep_driver17_encryption may give DsnParams
   because "every connection string mssql-python sees went through the one keyword table"
 
 does fabric_dsn_params
-  intent  "get_odbc_dsn_dict of FabricCredentials"
+  intent  "get_odbc_dsn_dict of FabricCredentials: ActiveDirectoryServicePrincipal with UID and PWD only for a full service principal"
   takes   FabricCredentials@resolved
   gives   DsnParams
+
+exposes concept TokenProvider "an azure-identity TokenCredential the driver asks for a token on every connect, or none"
+
+failure InvalidAuthentication "an unknown authentication method, or authentication settings that cannot be used together"
+
+exposes does mssql_token_provider
+  intent  "token_provider(): the azure_credential set in code, or none"
+  takes   MsSqlCredentials@resolved
+  gives   TokenProvider
+
+exposes does fabric_token_provider
+  intent  "token_provider(): the azure_credential set in code, otherwise the attached DefaultAzureCredential when the service principal is incomplete, or none"
+  takes   FabricCredentials@resolved
+  gives   TokenProvider

@@ -24,11 +24,11 @@ exposes concept ResultRows "rows of the first result set, or None for statements
 
 exposes does open_connection
   intent  "mssql_python.connect with the connection string the keyword map produced"
-  takes   dsn: OdbcDsn@accepted, timeout: ConnectionTimeout
+  takes   dsn: mssql_config.OdbcDsn@accepted, timeout: ConnectionTimeout, provider: mssql_config.TokenProvider
   gives   Connection@ready
   fails   DatabaseTransientException, DatabaseTerminalException
   steps
-    mssql_python_connect dsn, timeout -> Connection@ready
+    mssql_python_connect dsn, timeout, provider -> Connection@ready
 
 exposes does execute_query
   intent  "execute_query/execute_sql: %s becomes ?, args are unpacked into cursor.execute, pending result sets are drained"
@@ -87,8 +87,8 @@ does rollback_transaction
   fails   DatabaseTerminalException
 
 does mssql_python_connect
-  intent  "mssql_python.connect(dsn, timeout=connect_timeout, autocommit=True, native_uuid=False)"
-  takes   OdbcDsn@accepted, ConnectionTimeout
+  intent  "mssql_python.connect(dsn, timeout=connect_timeout, autocommit=True, native_uuid=False, token_provider=provider)"
+  takes   mssql_config.OdbcDsn@accepted, ConnectionTimeout, mssql_config.TokenProvider
   gives   Connection@ready
   effects reads entra_id, reads/writes sql_server
   fails   DatabaseTransientException, DatabaseTerminalException

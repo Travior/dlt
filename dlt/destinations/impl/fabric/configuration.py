@@ -4,8 +4,10 @@ from typing import Optional, Final, ClassVar, Dict, Any, List
 from dlt.common.configuration import configspec
 from dlt.common.configuration.exceptions import ConfigurationValueError
 from dlt.common.configuration.specs import AzureServicePrincipalCredentials
+from dlt.common.configuration.specs.base_configuration import NotResolved
 from dlt.common.destination.client import DestinationClientDwhWithStagingConfiguration
 from dlt.common.exceptions import MissingDependencyException
+from dlt.common.typing import Annotated
 from dlt.common.utils import digest128
 from dlt import version
 
@@ -42,6 +44,10 @@ class FabricCredentials(AzureServicePrincipalCredentials):
     azure_storage_account_name: Optional[str] = None
     """Not used for Fabric Warehouse credentials (only staging credentials need this)"""
 
+    azure_credential: Annotated[Optional[Any], NotResolved()] = None
+    """An azure-identity `TokenCredential` the driver asks for an access token on every connect,
+    e.g. one that signs in as the identity of a Fabric notebook. Set it in code"""
+
     def on_partial(self) -> None:
         """Enable fallback to DefaultAzureCredential if explicit credentials not provided."""
         try:
@@ -61,17 +67,31 @@ class FabricCredentials(AzureServicePrincipalCredentials):
         params = {
             "SERVER": f"{self.host},{self.port}",
             "DATABASE": self.database,
-            "AUTHENTICATION": "ActiveDirectoryServicePrincipal",
             "Encrypt": "yes",
             "TrustServerCertificate": "no",
         }
-
-        # Add Service Principal credentials if provided
-        if self.azure_client_id and self.azure_tenant_id and self.azure_client_secret:
+        if self._has_service_principal():
+            params["AUTHENTICATION"] = "ActiveDirectoryServicePrincipal"
             params["UID"] = f"{self.azure_client_id}@{self.azure_tenant_id}"
             params["PWD"] = str(self.azure_client_secret)
-
         return params
+
+    def token_provider(self) -> Optional[Any]:
+        """Returns the `TokenCredential` the driver gets access tokens from, if any.
+
+        `azure_credential` when set, otherwise the `DefaultAzureCredential` attached when the
+        service principal is incomplete.
+        """
+        if self.azure_credential is not None:
+            return self.azure_credential
+        if self._has_service_principal():
+            return None
+        return self.default_credentials()
+
+    def _has_service_principal(self) -> bool:
+        return self.azure_credential is None and bool(
+            self.azure_client_id and self.azure_tenant_id and self.azure_client_secret
+        )
 
     def to_odbc_dsn(self) -> str:
         """Returns the connection string mssql-python connects with."""

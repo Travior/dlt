@@ -57,6 +57,7 @@ class PyOdbcMsSqlClient(SqlClientBase[mssql_python.Connection], DBTransaction):
             autocommit=True,
             timeout=self.credentials.connect_timeout,
             native_uuid=False,
+            token_provider=self.credentials.token_provider(),
         )
         return self._conn
 
@@ -105,14 +106,7 @@ class PyOdbcMsSqlClient(SqlClientBase[mssql_python.Connection], DBTransaction):
         open transaction, so a failure commits nothing. Source columns map to `columns` by
         position.
         """
-        authentication = next(
-            (
-                str(v).lower()
-                for k, v in (self.credentials.query or {}).items()
-                if k.lower() == "authentication"
-            ),
-            "",
-        )
+        authentication = self.credentials.authentication_method()
         if authentication in BULK_COPY_UNSUPPORTED_AUTHENTICATION:
             raise ValueError(
                 f"Bulk copy cannot sign in with `Authentication={authentication}`. Load with"
