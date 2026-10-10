@@ -1,12 +1,10 @@
-import struct
-from datetime import datetime, timedelta, timezone  # noqa: I251
-
-from dlt.common.destination import DestinationCapabilitiesContext
-
-import pyodbc
-
 from contextlib import contextmanager
 from typing import Any, AnyStr, ClassVar, Iterator, Optional, Sequence, Tuple
+
+import mssql_python
+from mssql_python.exceptions import sqlstate_to_exception
+
+from dlt.common.destination import DestinationCapabilitiesContext
 
 from dlt.destinations.exceptions import (
     DatabaseTerminalException,
@@ -25,23 +23,18 @@ from dlt.destinations.impl.mssql.configuration import MsSqlCredentials
 from dlt.common.destination.dataset import DBApiCursor
 
 
-def handle_datetimeoffset(dto_value: bytes) -> datetime:
-    # ref: https://github.com/mkleehammer/pyodbc/issues/134#issuecomment-281739794
-    tup = struct.unpack("<6hI2h", dto_value)  # e.g., (2017, 3, 16, 10, 35, 18, 500000000, -6, 0)
-    return datetime(
-        tup[0],
-        tup[1],
-        tup[2],
-        tup[3],
-        tup[4],
-        tup[5],
-        tup[6] // 1000,
-        timezone(timedelta(hours=tup[7], minutes=tup[8])),
-    )
+def _driver_error(sqlstate: str) -> str:
+    # mssql-python exposes no SQLSTATE, only the fixed `driver_error` text it maps each one to
+    return sqlstate_to_exception(sqlstate, "").driver_error
 
 
-class PyOdbcMsSqlClient(SqlClientBase[pyodbc.Connection], DBTransaction):
-    dbapi: ClassVar[DBApi] = pyodbc
+UNDEFINED_RELATION_ERROR = _driver_error("42S02")
+SYNTAX_OR_ACCESS_ERROR = _driver_error("42000")
+WRONG_PARAMETER_COUNT_ERROR = _driver_error("07002")
+
+
+class PyOdbcMsSqlClient(SqlClientBase[mssql_python.Connection], DBTransaction):
+    dbapi: ClassVar[DBApi] = mssql_python
 
     def __init__(
         self,
@@ -51,17 +44,17 @@ class PyOdbcMsSqlClient(SqlClientBase[pyodbc.Connection], DBTransaction):
         capabilities: DestinationCapabilitiesContext,
     ) -> None:
         super().__init__(credentials.database, dataset_name, staging_dataset_name, capabilities)
-        self._conn: pyodbc.Connection = None
+        self._conn: mssql_python.Connection = None
         self.credentials = credentials
 
-    def open_connection(self) -> pyodbc.Connection:
-        self._conn = pyodbc.connect(
+    def open_connection(self) -> mssql_python.Connection:
+        # native_uuid=False returns uniqueidentifier as str, like pyodbc did
+        self._conn = mssql_python.connect(
             self.credentials.to_odbc_dsn(),
+            autocommit=True,
             timeout=self.credentials.connect_timeout,
+            native_uuid=False,
         )
-        # https://github.com/mkleehammer/pyodbc/wiki/Using-an-Output-Converter-function
-        self._conn.add_output_converter(-155, handle_datetimeoffset)
-        self._conn.autocommit = True
         return self._conn
 
     @raise_open_connection_error
@@ -89,18 +82,16 @@ class PyOdbcMsSqlClient(SqlClientBase[pyodbc.Connection], DBTransaction):
     def rollback_transaction(self) -> None:
         try:
             self._conn.rollback()
-        except pyodbc.ProgrammingError as ex:
-            if (
-                ex.args[0] == "42000" and "(111214)" in ex.args[1]
-            ):  # "no corresponding transaction found"
-                pass  # there was nothing to rollback, we silently ignore the error
-            else:
+        except mssql_python.ProgrammingError as ex:
+            # synapse error 111214: there was nothing to roll back
+            message = str(ex)
+            if "111214" not in message and "No corresponding transaction found" not in message:
                 raise
         finally:
             self._conn.autocommit = True
 
     @property
-    def native_connection(self) -> pyodbc.Connection:
+    def native_connection(self) -> mssql_python.Connection:
         return self._conn
 
     def drop_dataset(self) -> None:
@@ -148,7 +139,7 @@ class PyOdbcMsSqlClient(SqlClientBase[pyodbc.Connection], DBTransaction):
     def execute_query(self, query: AnyStr, *args: Any, **kwargs: Any) -> Iterator[DBApiCursor]:
         assert isinstance(query, str)
         if kwargs:
-            raise NotImplementedError("pyodbc does not support named parameters in queries")
+            raise NotImplementedError("mssql does not support named parameters in queries")
         if args:
             # TODO: this is bad. See duckdb & athena also
             query = query.replace("%s", "?")
@@ -156,27 +147,26 @@ class PyOdbcMsSqlClient(SqlClientBase[pyodbc.Connection], DBTransaction):
         curr = self._conn.cursor()
         try:
             # unpack because empty tuple gets interpreted as a single argument
-            # https://github.com/mkleehammer/pyodbc/wiki/Features-beyond-the-DB-API#passing-parameters
             curr.execute(query, *args)
             # NOTE: firsts recordset is wrapped in a cursor
-            yield DBApiCursorImpl(curr)
+            yield DBApiCursorImpl(curr)  # type: ignore[arg-type]
             # clear all pending result sets
             try:
                 while curr.nextset():
                     pass
-            except pyodbc.Error:
+            except mssql_python.Error:
                 pass
-        except pyodbc.Error:
+        except mssql_python.Error:
             # clear all pending result sets
             try:
                 while curr.nextset():
                     pass
-            except pyodbc.Error:
+            except mssql_python.Error:
                 pass
             # immediately rollback transaction
             try:
                 self._conn.rollback()
-            except pyodbc.Error:
+            except mssql_python.Error:
                 pass
             raise
         finally:
@@ -188,27 +178,23 @@ class PyOdbcMsSqlClient(SqlClientBase[pyodbc.Connection], DBTransaction):
 
     @classmethod
     def _make_database_exception(cls, ex: Exception) -> Exception:
-        if isinstance(ex, pyodbc.ProgrammingError):
-            if ex.args[0] == "42S02":
+        if isinstance(ex, mssql_python.ProgrammingError):
+            if ex.driver_error == UNDEFINED_RELATION_ERROR:
                 return DatabaseUndefinedRelation(ex)
-            # certain pyodbc exceptions do not have second argument
-            if len(ex.args) > 1:
-                if ex.args[1] == "HY000":
-                    return DatabaseTransientException(ex)
-                elif ex.args[0] == "42000":
-                    if "(15151)" in ex.args[1]:
-                        return DatabaseUndefinedRelation(ex)
-                    return DatabaseTransientException(ex)
-        elif isinstance(ex, pyodbc.OperationalError):
-            return DatabaseTransientException(ex)
-        elif isinstance(ex, pyodbc.Error):
-            if ex.args[0] == "07002":  # incorrect number of arguments supplied
+            if ex.driver_error == SYNTAX_OR_ACCESS_ERROR:
+                # error 15151: the schema or object does not exist
+                if "because it does not exist" in ex.ddbc_error:
+                    return DatabaseUndefinedRelation(ex)
                 return DatabaseTransientException(ex)
+            if ex.driver_error == WRONG_PARAMETER_COUNT_ERROR:
+                return DatabaseTransientException(ex)
+        elif isinstance(ex, mssql_python.OperationalError):
+            return DatabaseTransientException(ex)
         return DatabaseTerminalException(ex)
 
     @staticmethod
     def is_dbapi_exception(ex: Exception) -> bool:
-        return isinstance(ex, pyodbc.Error)
+        return isinstance(ex, mssql_python.Error)
 
     def _limit_clause_sql(self, limit: int) -> Tuple[str, str]:
         return f"TOP ({limit})", ""

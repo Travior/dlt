@@ -19,15 +19,13 @@ pip install "dlt[mssql]"
 
 ### Prerequisites
 
-The _Microsoft ODBC Driver for SQL Server_ must be installed to use this destination.
-This cannot be included with `dlt`'s Python dependencies, so you must install it separately on your system. You can find the official installation instructions [here](https://learn.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server?view=sql-server-ver16).
+`dlt` connects with [mssql-python](https://github.com/microsoft/mssql-python), Microsoft's Python driver for SQL Server. It
+bundles the _ODBC Driver 18 for SQL Server_, so you don't need to install an ODBC driver on your system.
 
-Supported driver versions:
-
-* `ODBC Driver 18 for SQL Server`
-* `ODBC Driver 17 for SQL Server`
-
-You can also [configure the driver name](#additional-destination-options) explicitly.
+:::note
+[ibis](../../general-usage/dataset-access/dataset.md#ibis) and [dbt](#dbt-support) still connect through `pyodbc` and need a
+system ODBC driver. See [ODBC driver for ibis and dbt](#odbc-driver-for-ibis-and-dbt).
+:::
 
 ### Create a pipeline
 
@@ -68,18 +66,17 @@ connect_timeout = 15
 TrustServerCertificate="yes"
 # require SSL connection
 Encrypt="yes"
-# send large string as VARCHAR, not legacy TEXT
-LongAsMax="yes"
 ```
 
 You can also pass a SQLAlchemy-like database connection:
 
 ```toml
 # Keep it at the top of your TOML file, before any section starts
-destination.mssql.credentials="mssql://loader:<password>@loader.database.windows.net/dlt_data?TrustServerCertificate=yes&Encrypt=yes&LongAsMax=yes"
+destination.mssql.credentials="mssql://loader:<password>@loader.database.windows.net/dlt_data?TrustServerCertificate=yes&Encrypt=yes"
 ```
 
-You can place any ODBC-specific settings into the query string or **destination.mssql.credentials.query** TOML table as in the example above.
+You can place ODBC connection keywords into the query string or **destination.mssql.credentials.query** TOML table as in the example above.
+See [connection keywords](#connection-keywords) for the keywords `dlt` passes to the driver.
 
 **To connect to an `mssql` server using Windows authentication**, include `trusted_connection=yes` in the connection string.
 
@@ -103,11 +100,26 @@ destination.mssql.credentials="mssql://loader:loader@localhost/dlt_data?encrypt=
 destination.mssql.credentials="mssql://loader:loader@localhost/dlt_data?TrustServerCertificate=yes"
 ```
 
-**To use long strings (>8k) and avoid collation errors**:
+### Connection keywords
 
-```toml
-destination.mssql.credentials="mssql://loader:loader@localhost/dlt_data?LongAsMax=yes"
-```
+`dlt` translates the keywords you configure to the ones `mssql-python` accepts:
+
+* `Server`, `Address`, `Addr`, `Database`, `UID`, `PWD`, `Authentication`, `Trusted_Connection`, `Encrypt`, `TrustServerCertificate`,
+  `HostnameInCertificate`, `ServerCertificate`, `ServerSPN`, `MultiSubnetFailover`, `ApplicationIntent`, `ConnectRetryCount`,
+  `ConnectRetryInterval`, `KeepAlive`, `KeepAliveInterval`, `IpAddressPreference` and `PacketSize` (or `Packet Size`) are passed to the driver.
+  Keywords are case-insensitive. When synonyms such as `Server` and `Addr` are both set, the first one wins.
+* `Driver` and `LongAsMax` are not needed: the bundled driver binds long strings and binaries as `max` types.
+* `DSN`, `FileDSN`, `AttachDBFileName`, `Failover_Partner`, `FailoverPartnerSPN`, `ClientCertificate`, `ClientKey`, the Always Encrypted keywords
+  (`ColumnEncryption`, `KeystoreAuthentication`, `KeystorePrincipalId`, `KeystoreSecret`), `Net`/`Network` other than TCP, and
+  `AutoTranslate`, `QuotedId` or `AnsiNPW` set to `no` are rejected: `mssql-python` cannot honor them.
+* Any other keyword is ignored with a warning, as the ODBC driver did before.
+* Keywords with empty values are left out.
+
+:::caution
+The ODBC Driver 17 did not encrypt connections by default, the bundled ODBC Driver 18 does. If you configured
+`driver="ODBC Driver 17 for SQL Server"` and no `Encrypt` keyword, `dlt` sets `Encrypt=no` for you and warns. Set `Encrypt`
+explicitly to silence the warning.
+:::
 
 **To pass credentials directly**, use the [explicit instance of the destination](../../general-usage/destination.md#pass-explicit-credentials)
 
@@ -161,7 +173,7 @@ We copy parquet files with batches of size of 1 row group. All groups are copied
 :::caution
 It looks like ADBC driver is based on [go-mssqldb](https://github.com/denisenkom/go-mssqldb?tab=readme-ov-file)
 
-DSN format is different. We translate a few overlapping keys. `pyodbc` and `adbc` ignore unknown keys so you can specify keys for both in the same string.
+DSN format is different. We translate a few overlapping keys. The ADBC driver ignores unknown keys, `mssql-python` ignores them with a warning.
 :::
 
 You can go back to `insert_values` by passing `loader_file_format` to a resource or pipeline
@@ -177,11 +189,11 @@ pipeline.run(data_iter, dataset_name="speed_test_2", write_disposition="replace"
 Data is loaded via INSERT statements by default. MSSQL has a limit of 1000 rows per INSERT, and this is what we use. We send multiple
 sql statements in a single batch. In case you observe odbc driver locking (i.e. when connection with open transaction leaks into the pool) you can:
 
-1. disable `pyodbc` connection pool.
+1. disable the `mssql-python` connection pool.
 
 ```py
-import pyodbc
-pyodbc.pooling = False
+import mssql_python
+mssql_python.pooling(enabled=False)
 ```
 
 2. disable batching of multiple statements in `dlt`
@@ -227,7 +239,11 @@ The **mssql** destination **does not** create UNIQUE indexes by default on colum
 create_indexes=true
 ```
 
-You can explicitly set the ODBC driver name:
+### ODBC driver for ibis and dbt
+
+ibis and dbt connect through `pyodbc`, which needs the [Microsoft ODBC Driver for SQL Server](https://learn.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server)
+installed on your system. ibis uses `ODBC Driver 18 for SQL Server` or `ODBC Driver 17 for SQL Server`, whichever is installed,
+and dbt uses `ODBC Driver 18 for SQL Server`. You can set the driver name explicitly:
 
 ```toml
 [destination.mssql.credentials]

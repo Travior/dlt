@@ -1,0 +1,82 @@
+context mssql_load
+  layer  destination
+  intent "Connect the mssql, synapse and fabric job clients and load files into tables"
+
+external adbc_driver_manager : system "adbc_driver_manager with the Columnar go-mssqldb based mssql driver installed by dbc"
+
+failure IngestError "the ADBC driver rejected the data or the connection"
+
+concept TableSchema    "a prepared dlt table schema, including its requested file_format"
+concept LoaderFormats  "preferred and supported loader file formats for one table"
+  state probed
+    parquet_needs_adbc: parquet is offered and preferred only if the mssql ADBC driver loads
+concept ParquetFile    "a parquet load job file, read one row group at a time"
+concept AdbcConnection "a second connection to the database, opened by the ADBC mssql driver"
+concept TableAppend    "the rows of one load file appended to the destination table"
+  state atomic
+    all_or_nothing: either every row of the file is committed or none is, so a retried job cannot duplicate a prefix
+
+exposes does mssql_connect
+  intent  "PyOdbcMsSqlClient.open_connection for the mssql and synapse destinations"
+  takes   creds: mssql_config.MsSqlCredentials@resolved, timeout: mssql_client.ConnectionTimeout
+  gives   mssql_client.Connection@ready
+  fails   UnsupportedConnectionKeyword, DatabaseTransientException, DatabaseTerminalException
+  steps
+    mssql_config.mssql_to_odbc_dsn creds        -> dsn
+    mssql_client.open_connection   dsn, timeout -> mssql_client.Connection@ready
+
+exposes does fabric_connect
+  intent  "FabricSqlClient.open_connection: the same client, given FabricCredentials it duck-types as MsSqlCredentials"
+  takes   creds: mssql_config.FabricCredentials@resolved, timeout: mssql_client.ConnectionTimeout
+  gives   mssql_client.Connection@ready
+  fails   UnsupportedConnectionKeyword, DatabaseTransientException, DatabaseTerminalException
+  steps
+    mssql_config.fabric_to_odbc_dsn creds        -> dsn
+    mssql_client.open_connection    dsn, timeout -> mssql_client.Connection@ready
+
+exposes does select_mssql_loader_formats
+  intent  "loader_file_format_selector of mssql: probe for the ADBC driver on every table"
+  takes   table: TableSchema
+  gives   LoaderFormats@probed
+  effects reads adbc_driver_manager
+  because "synapse and fabric load parquet only from staging with COPY INTO and are not modelled here"
+
+exposes does load_parquet_file
+  intent  "MssqlParquetCopyJob: append a parquet file through a second, ADBC connection"
+  takes   creds: mssql_config.MsSqlCredentials@resolved, file: ParquetFile
+  gives   TableAppend@atomic
+  fails   IngestError
+  steps
+    mssql_config.mssql_dsn_params creds        -> params
+    odbc_to_go_mssql_dsn          params       -> go_params
+    mssql_config.build_odbc_dsn   go_params    -> go_dsn
+    adbc_connect                  go_dsn       -> adbc
+    ingest_per_row_group          adbc, file   -> append
+    adbc_commit                   adbc, append -> TableAppend@atomic
+
+does odbc_to_go_mssql_dsn
+  intent  "Rewrite ENCRYPT and TRUSTSERVERCERTIFICATE values to go-mssqldb spelling, pass every other key through"
+  takes   mssql_config.DsnParams@from_credentials
+  gives   mssql_config.DsnParams
+  because "an Authentication= keyword reaches go-mssqldb unchanged, which does not perform ODBC's Entra ID sign-in"
+
+does adbc_connect
+  intent  "adbc dbapi.connect(driver='mssql', uri=...)"
+  takes   mssql_config.OdbcDsn
+  gives   AdbcConnection
+  effects reads adbc_driver_manager, reads/writes mssql_client.sql_server
+  fails   IngestError
+
+does ingest_per_row_group
+  intent  "adbc_ingest(mode='append') once per row group, the driver buffers its whole input"
+  takes   AdbcConnection, ParquetFile
+  gives   TableAppend
+  effects writes mssql_client.sql_server
+  fails   IngestError
+
+does adbc_commit
+  intent  "one commit after every row group was ingested"
+  takes   AdbcConnection, TableAppend
+  gives   TableAppend@atomic
+  effects writes mssql_client.sql_server
+  fails   IngestError

@@ -1,0 +1,156 @@
+context mssql_config
+  layer  configuration
+  intent "Turn the credentials a user configured for mssql, synapse or fabric into what the driver connects with"
+exposes external entra_id : network "Microsoft Entra ID token endpoints"
+  because "the driver signs in there when the connection string names an Entra ID method"
+
+failure ConfigFieldMissing   "a required credential field is not configured"
+failure MissingAzureIdentity "azure-identity is not installed"
+
+concept ConfiguredValue "a connection string, a dict or explicit fields, from code, config.toml, secrets.toml or env"
+
+exposes concept MsSqlCredentials "host, port, database, username, password, driver, connect_timeout and a free-form query table"
+  state parsed
+    query_lowercased:    every query key is lowercased
+    timeout_read:        connect_timeout is read from the query, the key stays in the query
+  state resolved extends parsed
+    required_present:    host, database, username and password are set
+    database_lowercased: database is lowercased
+
+exposes concept FabricCredentials "host, port, database, connect_timeout and the azure service principal fields; no username, password, driver or query"
+  state resolved
+    sp_or_default:           either azure_client_id, azure_client_secret and azure_tenant_id are all set, or a DefaultAzureCredential is attached
+    fabric_required_present: host and database are set
+
+exposes concept DsnParams "ODBC keyword to value mapping that pyodbc receives"
+  state from_credentials
+    fields_first:    DRIVER, SERVER (host,port), DATABASE, UID and PWD come from the credential fields
+    query_overrides: every query key is upper-cased and copied in after the fields, so it overrides them
+    unknown_kept:    query keys the ODBC driver does not know are kept, the driver ignores them
+  state translated
+    canonical_keys:  only keywords mssql-python's parser accepts, in canonical spelling, each once
+    no_empty_keys:   keywords with empty values are left out
+
+exposes concept OdbcDsn "a semicolon separated ODBC connection string"
+  state escaped
+    values_braced:   values containing ; or } are wrapped in braces with } doubled
+  state accepted extends escaped
+    allowlisted:     only keywords mssql-python's parser accepts, in canonical spelling, each once
+    no_empty_values: keywords with empty values are left out
+
+exposes does resolve_mssql_credentials
+  intent  "Resolve MsSqlCredentials or SynapseCredentials, its subclass, from config"
+  takes   value: ConfiguredValue
+  gives   MsSqlCredentials@resolved
+  fails   ConfigFieldMissing
+  steps
+    parse_mssql_native_value value -> creds
+    validate_mssql_fields    creds -> MsSqlCredentials@resolved
+
+does parse_mssql_native_value
+  intent  "parse_native_representation: url fields, query lowercased, driver and connect_timeout read from the query"
+  takes   ConfiguredValue
+  gives   MsSqlCredentials@parsed
+
+does validate_mssql_fields
+  intent  "on_resolved: require the fields and lowercase the database; a configured driver is kept for ibis and dbt"
+  takes   MsSqlCredentials@parsed
+  gives   MsSqlCredentials@resolved
+  fails   ConfigFieldMissing
+
+exposes does mssql_dsn_params
+  intent  "get_odbc_dsn_dict: shared by the sql client and the ADBC parquet job"
+  takes   creds: MsSqlCredentials@resolved
+  gives   DsnParams@from_credentials
+  because "mssql-python binds long str and bytes as max types, so Synapse no longer needs LongAsMax"
+  steps
+    fields_and_query_params creds -> DsnParams@from_credentials
+
+does fields_and_query_params
+  takes   MsSqlCredentials@resolved
+  gives   DsnParams@from_credentials
+
+exposes does build_odbc_dsn
+  intent  "Join DsnParams into a connection string, skipping None values and writing empty values as KEY="
+  takes   DsnParams
+  gives   OdbcDsn@escaped
+
+exposes does mssql_to_odbc_dsn
+  intent  "to_odbc_dsn of MsSqlCredentials and SynapseCredentials"
+  takes   creds: MsSqlCredentials@resolved
+  gives   OdbcDsn@accepted
+  fails   UnsupportedConnectionKeyword
+  steps
+    mssql_dsn_params    creds  -> params
+    map_pyodbc_keywords params -> OdbcDsn@accepted
+
+exposes does resolve_fabric_credentials
+  intent  "Resolve FabricCredentials from config"
+  takes   value: ConfiguredValue
+  gives   FabricCredentials@resolved
+  fails   ConfigFieldMissing, MissingAzureIdentity
+  steps
+    parse_fabric_native_value       value -> creds
+    attach_default_azure_credential creds -> FabricCredentials@resolved
+
+does parse_fabric_native_value
+  takes   ConfiguredValue
+  gives   FabricCredentials
+  fails   ConfigFieldMissing
+
+does attach_default_azure_credential
+  intent  "on_partial: without a full service principal, attach DefaultAzureCredential()"
+  takes   FabricCredentials
+  gives   FabricCredentials@resolved
+  fails   MissingAzureIdentity
+  because "nothing on the connection path reads the attached credential: the DSN still says ActiveDirectoryServicePrincipal without UID/PWD"
+
+exposes does fabric_to_odbc_dsn
+  intent  "to_odbc_dsn of FabricCredentials: hard-coded driver 18, ActiveDirectoryServicePrincipal, LongAsMax, Encrypt; UID/PWD only with a full service principal"
+  takes   creds: FabricCredentials@resolved
+  gives   OdbcDsn@accepted
+  fails   UnsupportedConnectionKeyword
+  because "the same keyword map escapes the Fabric connection string"
+  steps
+    fabric_dsn_params   creds  -> params
+    map_pyodbc_keywords params -> OdbcDsn@accepted
+
+exposes failure UnsupportedConnectionKeyword "a configured pyodbc keyword whose effect mssql-python cannot provide, e.g. DSN or ColumnEncryption"
+
+does translate_pyodbc_keywords
+  intent  "One table from every documented ODBC Driver 17/18 keyword to its mssql-python spelling, to dropped (with a warning, unless the bundled driver already behaves that way) or to rejected"
+  takes   DsnParams
+  gives   DsnParams@translated
+  fails   UnsupportedConnectionKeyword
+  because "pyodbc ignored keywords the driver does not know and mssql-python rejects them, so unknown keys are dropped with a warning; keys that change what is read or where it is read from are rejected"
+
+does keep_driver17_encryption
+  intent  "Encrypt=no when ODBC Driver 17 is configured and Encrypt is not, with a deprecation warning"
+  takes   DsnParams@translated
+  gives   DsnParams@translated
+  because "driver 17 did not encrypt by default, the bundled driver 18 requires a trusted certificate by default"
+
+does build_accepted_dsn variant of build_odbc_dsn
+  takes   DsnParams@translated
+  gives   OdbcDsn@accepted
+  adds    allowlisted, no_empty_values
+  because "the same escaping, applied to keywords the translation already checked"
+
+does map_pyodbc_keywords
+  intent  "Turn pyodbc keywords into a connection string mssql-python accepts"
+  takes   params: DsnParams
+  gives   OdbcDsn@accepted
+  fails   UnsupportedConnectionKeyword
+  steps
+    translate_pyodbc_keywords  params   -> keywords
+    when params name ODBC Driver 17 and keywords have no Encrypt
+      keep_driver17_encryption keywords -> keywords
+    build_accepted_dsn         keywords -> OdbcDsn@accepted
+
+rule only translate_pyodbc_keywords, keep_driver17_encryption may give DsnParams@translated
+  because "every connection string mssql-python sees went through the one keyword table"
+
+does fabric_dsn_params
+  intent  "get_odbc_dsn_dict of FabricCredentials"
+  takes   FabricCredentials@resolved
+  gives   DsnParams

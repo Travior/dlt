@@ -19,17 +19,11 @@ pip install "dlt[synapse]"
 
 ### Prerequisites
 
-* **Microsoft ODBC Driver for SQL Server**
+* **No ODBC driver installation**
 
-    The _Microsoft ODBC Driver for SQL Server_ must be installed to use this destination.
-    This cannot be included with `dlt`'s Python dependencies, so you must install it separately on your system. You can find the official installation instructions [here](https://learn.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server?view=sql-server-ver16).
-
-    Supported driver versions:
-  * `ODBC Driver 18 for SQL Server`
-
-    :::info
-    Older driver versions do not work properly because they do not support the `LongAsMax` keyword that was [introduced](https://learn.microsoft.com/en-us/sql/connect/odbc/windows/features-of-the-microsoft-odbc-driver-for-sql-server-on-windows?view=sql-server-ver15#microsoft-odbc-driver-180-for-sql-server-on-windows) in `ODBC Driver 18 for SQL Server`. Synapse does not support the legacy ["long data types"](https://learn.microsoft.com/en-us/sql/t-sql/data-types/ntext-text-and-image-transact-sql), and requires "max data types" instead. `dlt` uses the `LongAsMax` keyword to automatically do the conversion.
-    :::
+    `dlt` connects with [mssql-python](https://github.com/microsoft/mssql-python), which bundles the _ODBC Driver 18 for SQL Server_ and
+    sends long strings and binaries as "max data types", which Synapse requires. The [connection keywords](mssql.md#connection-keywords)
+    are the same as for the `mssql` destination. [dbt](#dbt-support) still connects through `pyodbc` and needs the driver installed on your system.
 
 * **Azure Synapse Workspace and dedicated SQL pool**
 
@@ -255,7 +249,7 @@ Descriptions:
 - `create_indexes` determines if `primary_key` and `unique` [column hints](#supported-column-hints) are applied.
 - `staging_use_msi` determines if the Managed Identity of the Synapse workspace is used to authorize access to the [staging](#staging-support) Storage Account. Ensure the Managed Identity has the [Storage Blob Data Reader](https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles#storage-blob-data-reader) role (or a higher-privileged role) assigned on the blob container if you set this option to `"true"`.
 - `port` is used for the ODBC connection.
-- `connect_timeout` sets the timeout for the `pyodbc` connection attempt, in seconds.
+- `connect_timeout` sets the timeout for the connection attempt, in seconds.
 
 ### dbt support
 

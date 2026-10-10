@@ -1,0 +1,102 @@
+context mssql_client
+  layer  driver
+  intent "Run dlt's SQL against SQL Server, Synapse and Fabric over one DB-API connection per sql client"
+
+exposes external sql_server : network "the SQL Server, Synapse or Fabric endpoint"
+  because "the ADBC parquet job opens its own connection to it"
+
+exposes failure DatabaseTransientException "a database error a retry may fix"
+exposes failure DatabaseTerminalException  "a database error a retry will not fix"
+exposes failure DatabaseUndefinedRelation  "the table or schema does not exist"
+failure DriverError                        "the DB-API error the driver raises"
+
+exposes concept ConnectionTimeout "connect_timeout in seconds"
+
+exposes concept Connection "an open pyodbc connection owned by one sql client"
+  state ready
+    autocommit_on:    autocommit is on outside begin_transaction
+    tz_aware_offsets: datetimeoffset values are fetched as tz-aware datetime
+    uuid_as_str:      uniqueidentifier values are fetched as str
+
+exposes concept Statement "SQL text with %s placeholders and positional args"
+
+exposes concept ResultRows "rows of the first result set, or None for statements without one"
+
+exposes does open_connection
+  intent  "mssql_python.connect with the connection string the keyword map produced"
+  takes   dsn: OdbcDsn@accepted, timeout: ConnectionTimeout
+  gives   Connection@ready
+  fails   DatabaseTransientException, DatabaseTerminalException
+  steps
+    mssql_python_connect dsn, timeout -> Connection@ready
+
+exposes does execute_query
+  intent  "execute_query/execute_sql: %s becomes ?, args are unpacked into cursor.execute, pending result sets are drained"
+  takes   conn: Connection@ready, statement: Statement
+  gives   ResultRows
+  fails   DatabaseTransientException, DatabaseTerminalException, DatabaseUndefinedRelation
+  steps
+    run_cursor                      conn, statement -> rows
+      on DriverError
+        rollback_after_error        conn
+        classify_mssql_python_error conn
+        fail DatabaseTerminalException
+    give rows
+
+does run_cursor
+  intent  "cursor.execute(query, *args) with %s rewritten to ?, fetch, then nextset() until exhausted and close"
+  takes   Connection@ready, Statement
+  gives   ResultRows
+  effects reads/writes sql_server
+  fails   DriverError
+  because "named parameters raise NotImplementedError before anything is sent"
+
+does rollback_after_error
+  intent  "conn.rollback() right after a failed statement, its own errors swallowed"
+  takes   Connection@ready
+  gives   nothing
+  effects writes sql_server
+
+exposes does run_in_transaction
+  intent  "begin_transaction: autocommit off, run the statements, commit or roll back, autocommit back on"
+  takes   conn: Connection@ready, statements: many Statement
+  gives   nothing
+  fails   DatabaseTransientException, DatabaseTerminalException, DatabaseUndefinedRelation
+  because "on any exception it calls rollback_transaction and re-raises the original exception"
+  steps
+    disable_autocommit conn
+    for each statement in statements
+      execute_query    conn, statement -> _rows
+    commit_transaction conn
+
+does disable_autocommit
+  takes   Connection@ready
+  gives   nothing
+
+does commit_transaction
+  takes   Connection@ready
+  gives   nothing
+  effects writes sql_server
+  fails   DatabaseTransientException, DatabaseTerminalException
+
+does rollback_transaction
+  intent  "rollback, swallowing Synapse's 'no corresponding transaction found' found by its message text"
+  takes   Connection@ready
+  gives   nothing
+  effects writes sql_server
+  fails   DatabaseTerminalException
+
+does mssql_python_connect
+  intent  "mssql_python.connect(dsn, timeout=connect_timeout, autocommit=True, native_uuid=False)"
+  takes   OdbcDsn@accepted, ConnectionTimeout
+  gives   Connection@ready
+  effects reads entra_id, reads/writes sql_server
+  fails   DatabaseTransientException, DatabaseTerminalException
+  because "the bundled driver decodes datetimeoffset as tz-aware datetime; native_uuid=False keeps uniqueidentifier as str"
+
+does classify_mssql_python_error
+  intent  "_make_database_exception: reads the SQLSTATE from the mssql-python exception class and driver_error, greps the message for missing objects"
+  takes   Connection@ready
+  gives   nothing
+  fails   DatabaseTransientException, DatabaseUndefinedRelation
+  because "mssql-python exposes no SQLSTATE or native error number attribute; the same SQLSTATE groups map to the same dlt exceptions as before"

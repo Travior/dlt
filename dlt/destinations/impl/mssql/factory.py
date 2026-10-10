@@ -4,7 +4,7 @@ from dlt.common import logger
 from dlt.common.destination import Destination, DestinationCapabilitiesContext
 from dlt.common.destination.configuration import ParquetFormatConfiguration
 from dlt.common.destination.typing import PreparedTableSchema
-from dlt.common.exceptions import TerminalValueError
+from dlt.common.exceptions import SystemConfigurationException, TerminalValueError
 from dlt.common.normalizers.naming.naming import NamingConvention
 from dlt.common.data_writers.escape import escape_postgres_identifier, escape_mssql_literal
 from dlt.common.arithmetics import DEFAULT_NUMERIC_PRECISION, DEFAULT_NUMERIC_SCALE
@@ -18,6 +18,35 @@ if TYPE_CHECKING:
     from dlt.common.libs.ibis import BaseBackend
     from dlt.common.schema import Schema
     from dlt.destinations.impl.mssql.mssql import MsSqlJobClient
+
+
+def discover_odbc_driver(credentials: MsSqlCredentials) -> str:
+    """Returns the ODBC driver ibis connects through pyodbc with.
+
+    Args:
+        credentials (MsSqlCredentials): Credentials with an optional configured `driver`.
+
+    Returns:
+        str: The configured driver, otherwise the first of `SUPPORTED_DRIVERS` installed.
+
+    Raises:
+        SystemConfigurationException: If no supported ODBC driver is installed.
+    """
+    if credentials.driver:
+        return credentials.driver
+    import pyodbc
+
+    available_drivers = pyodbc.drivers()
+    for driver in credentials.SUPPORTED_DRIVERS:
+        if driver in available_drivers:
+            return driver
+    docs_url = (
+        "https://learn.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server"
+    )
+    raise SystemConfigurationException(
+        f"No supported ODBC driver found for MS SQL Server. See {docs_url} for information on"
+        f" how to install the `{credentials.SUPPORTED_DRIVERS[0]}` on your platform."
+    )
 
 
 class MsSqlTypeMapper(TypeMapperImpl):
@@ -177,9 +206,10 @@ class mssql(Destination[MsSqlClientConfiguration, "MsSqlJobClient"]):
         """Create an ibis mssql backend for the client's dataset."""
         from dlt.helpers.ibis import ibis
 
-        ms_credentials = client.config.credentials.to_native_representation()
+        credentials = client.config.credentials
+        ms_credentials = credentials.to_native_representation()
         ms_credentials = ms_credentials.replace("synapse://", "mssql://")
-        return ibis.connect(ms_credentials, driver=client.config.credentials.driver)
+        return ibis.connect(ms_credentials, driver=discover_odbc_driver(credentials))
 
     def __init__(
         self,

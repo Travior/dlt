@@ -4,6 +4,7 @@ import os
 from typing import Optional, cast
 
 import pytest
+from mssql_python.connection_string_parser import _ConnectionStringParser
 
 from dlt.common.configuration import resolve_configuration
 from dlt.common.destination import DestinationCapabilitiesContext
@@ -60,21 +61,34 @@ def test_fabric_credentials_odbc_dsn() -> None:
     creds.azure_client_id = "test-client-id"
     creds.azure_client_secret = "test-client-secret"
 
-    # Resolve to trigger on_partial and on_resolved
-    # Get ODBC DSN parameters
     dsn_dict = creds.get_odbc_dsn_dict()
-
-    # Verify Fabric-specific parameters are added
     assert dsn_dict["AUTHENTICATION"] == "ActiveDirectoryServicePrincipal"
-    assert dsn_dict["LongAsMax"] == "yes"
     assert dsn_dict["UID"] == "test-client-id@test-tenant-id"
     assert dsn_dict["PWD"] == "test-client-secret"
-    assert dsn_dict["DRIVER"] == "{ODBC Driver 18 for SQL Server}"
     assert (
         dsn_dict["SERVER"]
         == "abc12345-6789-def0-1234-56789abcdef0.datawarehouse.fabric.microsoft.com,1433"
     )
     assert dsn_dict["DATABASE"] == "mydb"
+
+
+def test_fabric_credentials_to_odbc_dsn_escapes_secret() -> None:
+    creds = FabricCredentials()
+    creds.host = "test.datawarehouse.fabric.microsoft.com"
+    creds.database = "testdb"
+    creds.azure_tenant_id = "test-tenant"
+    creds.azure_client_id = "test-client"
+    creds.azure_client_secret = "se;cr}et"
+
+    assert _ConnectionStringParser(validate_keywords=True)._parse(creds.to_odbc_dsn()) == {
+        "server": "test.datawarehouse.fabric.microsoft.com,1433",
+        "database": "testdb",
+        "authentication": "ActiveDirectoryServicePrincipal",
+        "encrypt": "yes",
+        "trustservercertificate": "no",
+        "uid": "test-client@test-tenant",
+        "pwd": "se;cr}et",
+    }
 
 
 def test_fabric_configuration_defaults() -> None:
@@ -190,20 +204,6 @@ def test_fabric_credentials_no_driver_validation() -> None:
     # Verify credentials can be created (driver validation is not enforced at this stage)
     assert creds.host == "test.datawarehouse.fabric.microsoft.com"
     assert creds.database == "test_db"
-
-
-def test_fabric_credentials_longasmax_always_yes() -> None:
-    """Test that LONGASMAX is always set to 'yes' for UTF-8 support"""
-    creds = FabricCredentials()
-    creds.host = "test.datawarehouse.fabric.microsoft.com"
-    creds.database = "testdb"
-    creds.azure_tenant_id = "test-tenant"
-    creds.azure_client_id = "test-client"
-    creds.azure_client_secret = "test-secret"
-
-    # Get ODBC DSN and verify LONGASMAX is set to yes
-    dsn_dict = creds.get_odbc_dsn_dict()
-    assert dsn_dict["LongAsMax"] == "yes"
 
 
 def test_fabric_credentials_authentication_method() -> None:
