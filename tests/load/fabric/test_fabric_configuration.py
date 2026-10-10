@@ -253,3 +253,39 @@ def test_fabric_type_mapper_scales_varchar_precision(data_type: TDataType) -> No
         TColumnSchema, {"name": "c", "data_type": data_type, "precision": 10, "nullable": True}
     )
     assert mapper.to_destination_type(col, table) == "varchar(40)"
+
+
+def test_fabric_credentials_token_provider() -> None:
+    # a full service principal signs in through the driver
+    creds = FabricCredentials()
+    creds.host = "test.datawarehouse.fabric.microsoft.com"
+    creds.database = "testdb"
+    creds.azure_tenant_id = "test-tenant"
+    creds.azure_client_id = "test-client"
+    creds.azure_client_secret = "test-secret"
+    creds = resolve_configuration(creds)
+    assert creds.token_provider() is None
+
+    # otherwise the attached DefaultAzureCredential provides the tokens
+    creds = FabricCredentials()
+    creds.host = "test.datawarehouse.fabric.microsoft.com"
+    creds.database = "testdb"
+    creds = resolve_configuration(creds)
+    assert creds.token_provider() is creds.default_credentials() is not None
+    dsn = _ConnectionStringParser(validate_keywords=True)._parse(creds.to_odbc_dsn())
+    assert "authentication" not in dsn and "uid" not in dsn
+
+    # an explicit credential wins over the service principal
+    credential = object()
+    creds = FabricCredentials()
+    creds.host = "test.datawarehouse.fabric.microsoft.com"
+    creds.database = "testdb"
+    creds.azure_tenant_id = "test-tenant"
+    creds.azure_client_id = "test-client"
+    creds.azure_client_secret = "test-secret"
+    creds.azure_credential = credential
+    creds = resolve_configuration(creds)
+    assert creds.token_provider() is credential
+    assert "authentication" not in _ConnectionStringParser(validate_keywords=True)._parse(
+        creds.to_odbc_dsn()
+    )

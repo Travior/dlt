@@ -1,7 +1,7 @@
 import os
 import sys
 from types import ModuleType
-from typing import Dict
+from typing import Dict, Optional
 
 import pytest
 from mssql_python.connection_string_parser import _ConnectionStringParser
@@ -258,3 +258,102 @@ def test_discover_odbc_driver(monkeypatch: pytest.MonkeyPatch) -> None:
     # the configured driver wins
     creds.driver = "ODBC Driver 18 for SQL Server"
     assert discover_odbc_driver(creds) == "ODBC Driver 18 for SQL Server"
+
+
+@pytest.mark.parametrize(
+    "authentication",
+    [
+        "ActiveDirectoryDefault",
+        "ActiveDirectoryMsi",
+        "ActiveDirectoryInteractive",
+        "ActiveDirectoryDeviceCode",
+        "ActiveDirectoryIntegrated",
+    ],
+)
+def test_authentication_without_login(authentication: str) -> None:
+    creds = resolve_configuration(
+        MsSqlCredentials(f"mssql://sql.example.com/test_db?authentication={authentication}")
+    )
+    assert _parse_dsn(creds.to_odbc_dsn()) == {
+        "server": "sql.example.com,1433",
+        "database": "test_db",
+        "authentication": authentication,
+    }
+    # the same method as a credentials field
+    creds = MsSqlCredentials()
+    creds.host = "sql.example.com"
+    creds.database = "test_db"
+    creds.authentication = authentication
+    creds = resolve_configuration(creds)
+    assert _parse_dsn(creds.to_odbc_dsn())["authentication"] == authentication
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        pytest.param("", id="sql_login"),
+        pytest.param("?authentication=SqlPassword", id="sql_password"),
+        pytest.param("?authentication=ActiveDirectoryPassword", id="entra_password"),
+        pytest.param("?authentication=ActiveDirectoryServicePrincipal", id="service_principal"),
+    ],
+)
+def test_authentication_with_login_needs_password(query: str) -> None:
+    with pytest.raises(ConfigFieldMissingException):
+        resolve_configuration(MsSqlCredentials(f"mssql://sql.example.com/test_db{query}"))
+    creds = resolve_configuration(
+        MsSqlCredentials(f"mssql://client_id:secret@sql.example.com/test_db{query}")
+    )
+    assert _parse_dsn(creds.to_odbc_dsn())["pwd"] == "secret"
+
+
+def test_trusted_connection_without_login() -> None:
+    creds = resolve_configuration(
+        MsSqlCredentials("mssql://sql.example.com/test_db?trusted_connection=yes")
+    )
+    assert _parse_dsn(creds.to_odbc_dsn())["trusted_connection"] == "yes"
+
+
+@pytest.mark.parametrize(
+    "native_value,authentication,match",
+    [
+        pytest.param(
+            "mssql://u:p@sql.example.com/db?authentication=ActiveDirectoryToken",
+            None,
+            "Unknown authentication method",
+            id="unknown",
+        ),
+        pytest.param(
+            "mssql://u:p@sql.example.com/db?authentication=ActiveDirectoryMsi",
+            "ActiveDirectoryDefault",
+            "name different methods",
+            id="field_and_query_differ",
+        ),
+    ],
+)
+def test_invalid_authentication(
+    native_value: str, authentication: Optional[str], match: str
+) -> None:
+    creds = MsSqlCredentials(native_value)
+    creds.authentication = authentication
+    with pytest.raises(ConfigurationValueError, match=match):
+        resolve_configuration(creds)
+
+
+def test_azure_credential() -> None:
+    credential = object()
+    creds = MsSqlCredentials()
+    creds.host = "sql.example.com"
+    creds.database = "test_db"
+    creds.azure_credential = credential
+    creds = resolve_configuration(creds)
+    assert creds.token_provider() is credential
+    assert _parse_dsn(creds.to_odbc_dsn()) == {
+        "server": "sql.example.com,1433",
+        "database": "test_db",
+    }
+
+    # a token credential signs in on its own
+    creds = MsSqlCredentials("mssql://u:p@sql.example.com/test_db?authentication=SqlPassword")
+    creds.azure_credential = credential
+    with pytest.raises(ConfigurationValueError, match="authentication, username, password"):
+        resolve_configuration(creds)
