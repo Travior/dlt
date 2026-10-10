@@ -58,7 +58,7 @@ does validate_mssql_fields
   gives   MsSqlCredentials@resolved
   fails   ConfigFieldMissing
 
-exposes does mssql_dsn_params
+does mssql_dsn_params
   intent  "get_odbc_dsn_dict: shared by the sql client and the ADBC parquet job"
   takes   creds: MsSqlCredentials@resolved
   gives   DsnParams@from_credentials
@@ -70,7 +70,7 @@ does fields_and_query_params
   takes   MsSqlCredentials@resolved
   gives   DsnParams@from_credentials
 
-exposes does build_odbc_dsn
+does build_odbc_dsn
   intent  "Join DsnParams into a connection string, skipping None values and writing empty values as KEY="
   takes   DsnParams
   gives   OdbcDsn@escaped

@@ -1,0 +1,64 @@
+change arrow-bulk-copy
+  applied-to "sha256:v1:120746b4836c8853ff8b347aac1a5e24cc698e26d5b77fb335e6e9949c0f7fa9"
+  because    "load parquet with mssql-python's Arrow bulk copy over the destination's own connection instead of a second, ADBC connection"
+
+  add in mssql_client exposes concept ArrowStream "record batches streamed from a parquet file"
+    ! exposes ArrowStream
+
+  add in mssql_client exposes concept CopiedRows "the rows of one load file bulk copied into its table"
+    state atomic
+      single_batch:  copied in one bulk batch, so a failure commits nothing and a retried job cannot duplicate a prefix
+      by_name:       source columns are mapped to table columns by name
+      count_checked: rows_copied equals the rows in the file
+    ! exposes CopiedRows
+
+  add in mssql_client exposes does bulk_copy_arrow
+    intent  "cursor.bulkcopy_arrow(qualified table, stream, batch_size=0, timeout=0, column_mappings by name, keep_nulls=True), then compare rows_copied with the stream's row count"
+    takes   Connection@ready, ArrowStream
+    gives   CopiedRows@atomic
+    effects reads mssql_config.entra_id, writes sql_server
+    fails   DatabaseTransientException, DatabaseTerminalException
+    because "bulk copy opens its own native connection from the connection's string and authentication, outside any open transaction; Authentication methods it cannot perform fail as terminal before copying"
+    ! exposes bulk_copy_arrow
+
+  add in mssql_load does stream_parquet_file
+    intent  "a RecordBatchReader over ParquetFile.iter_batches, so peak memory stays one batch"
+    takes   ParquetFile
+    gives   mssql_client.ArrowStream
+
+  revise load_parquet_file
+    intent  "MssqlParquetCopyJob: append a parquet file with bulk copy over the job client's connection"
+    takes   conn: mssql_client.Connection@ready, file: ParquetFile
+    gives   mssql_client.CopiedRows@atomic
+    fails   mssql_client.DatabaseTransientException, mssql_client.DatabaseTerminalException
+    steps
+      stream_parquet_file file         -> stream
+      bulk_copy_arrow     conn, stream -> mssql_client.CopiedRows@atomic
+    ! changes load_parquet_file
+
+  remove odbc_to_go_mssql_dsn
+  remove adbc_connect
+  remove ingest_per_row_group
+  remove adbc_commit
+  remove AdbcConnection
+  remove TableAppend
+  remove IngestError
+
+  revise concept LoaderFormats
+    state probed
+      parquet_needs_pyarrow: parquet is offered only if pyarrow imports; insert_values stays preferred
+    ! changes LoaderFormats@probed
+
+  revise select_mssql_loader_formats
+    intent  "loader_file_format_selector of mssql: offer parquet when pyarrow is installed"
+    effects none
+    because "mssql-python always ships bulkcopy_arrow; parquet is offered, not preferred, so json sources keep loading with insert_values"
+    ! strengthens select_mssql_loader_formats
+  remove adbc_driver_manager
+
+  hide mssql_dsn_params
+    ! removes mssql_dsn_params
+  hide build_odbc_dsn
+    ! removes build_odbc_dsn
+  hide sql_server
+    ! removes sql_server

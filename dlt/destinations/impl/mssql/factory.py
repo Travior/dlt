@@ -1,4 +1,5 @@
-from typing import Any, Optional, Sequence, Type, Union, Dict, TYPE_CHECKING
+from importlib.util import find_spec
+from typing import Any, Optional, Sequence, Tuple, Type, Union, Dict, TYPE_CHECKING
 
 from dlt.common import logger
 from dlt.common.destination import Destination, DestinationCapabilitiesContext
@@ -9,8 +10,8 @@ from dlt.common.normalizers.naming.naming import NamingConvention
 from dlt.common.data_writers.escape import escape_postgres_identifier, escape_mssql_literal
 from dlt.common.arithmetics import DEFAULT_NUMERIC_PRECISION, DEFAULT_NUMERIC_SCALE
 
-from dlt.common.schema.typing import TColumnSchema, TColumnType
-from dlt.destinations._adbc_jobs import make_adbc_parquet_file_format_selector
+from dlt.common.schema.typing import TColumnSchema, TColumnType, TTableSchema
+from dlt.common.typing import TLoaderFileFormat
 from dlt.destinations.type_mapping import TypeMapperImpl
 from dlt.destinations.impl.mssql.configuration import MsSqlCredentials, MsSqlClientConfiguration
 
@@ -47,6 +48,25 @@ def discover_odbc_driver(credentials: MsSqlCredentials) -> str:
         f"No supported ODBC driver found for MS SQL Server. See {docs_url} for information on"
         f" how to install the `{credentials.SUPPORTED_DRIVERS[0]}` on your platform."
     )
+
+
+def _loader_file_format_selector(
+    preferred_loader_file_format: TLoaderFileFormat,
+    supported_loader_file_formats: Sequence[TLoaderFileFormat],
+    /,
+    *,
+    table_schema: TTableSchema,
+) -> Tuple[TLoaderFileFormat, Sequence[TLoaderFileFormat]]:
+    """Removes parquet from the supported formats when pyarrow is not installed"""
+    if find_spec("pyarrow") is None:
+        supported_loader_file_formats = [f for f in supported_loader_file_formats if f != "parquet"]
+        if table_schema.get("file_format") == "parquet":
+            logger.warning(
+                f"parquet file format was requested for table {table_schema['name']} but"
+                " pyarrow is not installed. Read more:"
+                " https://dlthub.com/docs/dlt-ecosystem/destinations/mssql#data-loading"
+            )
+    return preferred_loader_file_format, supported_loader_file_formats
 
 
 class MsSqlTypeMapper(TypeMapperImpl):
@@ -151,11 +171,7 @@ class mssql(Destination[MsSqlClientConfiguration, "MsSqlJobClient"]):
         caps = DestinationCapabilitiesContext()
         caps.preferred_loader_file_format = "insert_values"
         caps.supported_loader_file_formats = ["insert_values", "parquet", "model"]
-        caps.loader_file_format_selector = make_adbc_parquet_file_format_selector(
-            "mssql",
-            "https://dlthub.com/docs/dlt-ecosystem/destinations/mssql#data-loading",
-            prefer_parquet=True,
-        )
+        caps.loader_file_format_selector = _loader_file_format_selector
         caps.preferred_staging_file_format = None
         caps.supported_staging_file_formats = []
         caps.type_mapper = MsSqlTypeMapper
@@ -189,7 +205,7 @@ class mssql(Destination[MsSqlClientConfiguration, "MsSqlJobClient"]):
             "staging-optimized",
         ]
         caps.sqlglot_dialect = "tsql"
-        # ADBC driver for MSSQL does not support dictionary-encoded Arrow arrays
+        # dictionary-encoded Arrow arrays are not verified with bulk copy
         caps.parquet_format = ParquetFormatConfiguration(supports_dictionary_encoding=False)
 
         return caps

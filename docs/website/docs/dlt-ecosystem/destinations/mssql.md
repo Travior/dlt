@@ -140,49 +140,30 @@ recreated with an `ALTER SCHEMA ... TRANSFER`. The operation is atomic: MSSQL su
 ## Data loading
 
 :::tip
-We recommend using ADBC + parquet to load data. We observed 10x - 100x increase in loading speed compared to the INSERT method. **parquet** file format
-will activate automatically if the right driver is present in the system.
+Load Arrow tables and pandas frames with **parquet**: `dlt` bulk copies them with `mssql-python`, which is much faster than the INSERT method.
 :::
 
 ### Fast loading with parquet
 
-[parquet](../file-formats.md#parquet) file format is supported via [ADBC driver](https://arrow.apache.org/adbc/). **mssql** driver is provided by
-[Columnar](https://columnar.tech/). To install it you'll need `dbc` which is a tool to manage ADBC drivers:
+[parquet](../file-formats.md#parquet) files are loaded with the Arrow bulk copy of `mssql-python`. It needs `pyarrow`:
 
 ```sh
-pip install adbc-driver-manager dbc
-dbc install mssql
+pip install "dlt[mssql,parquet]"
 ```
 
-with `uv` you can run `dbc` directly:
-
-```sh
-uv tool run dbc search
-```
-
-`dlt` will make **parquet** the preferred file format once driver is detected at runtime. This method is 10x-70x faster than INSERT and
-we make it a default for all input data types.
-
-Not all arrow data types are supported by the driver, see driver docs for more details:
-
-* fixed length binary
-* time with precision different than microseconds
-
-We copy parquet files with batches of size of 1 row group. All groups are copied in a single transaction.
-
-:::caution
-It looks like ADBC driver is based on [go-mssqldb](https://github.com/denisenkom/go-mssqldb?tab=readme-ov-file)
-
-DSN format is different. We translate a few overlapping keys. The ADBC driver ignores unknown keys, `mssql-python` ignores them with a warning.
-:::
-
-You can go back to `insert_values` by passing `loader_file_format` to a resource or pipeline
+When `pyarrow` is installed, **parquet** is supported and Arrow tables and pandas frames are loaded with it. Other data keeps
+loading with INSERT statements unless you ask for parquet:
 
 ```py
-# revert to INSERT statements
 data_iter = iter(())  # your data generator
-pipeline.run(data_iter, dataset_name="speed_test_2", write_disposition="replace", table_name="unsw_flow", loader_file_format="insert_values")
+pipeline.run(data_iter, dataset_name="speed_test_2", write_disposition="replace", table_name="unsw_flow", loader_file_format="parquet")
 ```
+
+Each file is copied in a single batch over its own connection with the same credentials, so a failed load job commits nothing and can be retried.
+Columns are matched by name, and `dlt` checks that every row of the file was copied.
+
+Bulk copy cannot sign in with `Authentication=ActiveDirectoryPassword` or `Authentication=ActiveDirectoryIntegrated`. Load with
+`loader_file_format="insert_values"` when you use those.
 
 ### Loading with INSERT statements
 
@@ -205,7 +186,7 @@ dlt.destinations.mssql("mssql://loader:<password>@loader.database.windows.net/dl
 ## Supported file formats
 
 * [insert-values](../file-formats.md#sql-insert) is used by default
-* [parquet](../file-formats.md#parquet) is used if mssql ADBC driver is installed
+* [parquet](../file-formats.md#parquet) is supported if `pyarrow` is installed and used for Arrow tables and pandas frames
 
 ## Supported column hints
 

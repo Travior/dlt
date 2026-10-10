@@ -1,4 +1,5 @@
-from typing import TYPE_CHECKING, Dict, Iterator, Optional, Sequence, List, Any
+import time
+from typing import Dict, Optional, Sequence, List, Any
 
 from dlt.common import logger
 from dlt.common.destination.client import (
@@ -13,13 +14,13 @@ from dlt.common.schema import TColumnSchema, TColumnHint, Schema
 from dlt.common.schema.typing import TColumnType
 
 from dlt.common.storages.load_package import ParsedLoadJobFileName
-from dlt.destinations._adbc_jobs import AdbcParquetCopyJob
 from dlt.destinations.sql_jobs import SqlStagingReplaceFollowupJob, SqlMergeFollowupJob
 
 from dlt.destinations.insert_job_client import InsertValuesJobClient
 
 from dlt.destinations.impl.mssql.sql_client import PyOdbcMsSqlClient
-from dlt.destinations.impl.mssql.configuration import MsSqlClientConfiguration, build_odbc_dsn
+from dlt.destinations.exceptions import LoadJobTerminalException
+from dlt.destinations.impl.mssql.configuration import MsSqlClientConfiguration
 from dlt.destinations.sql_client import SqlClientBase
 
 
@@ -72,69 +73,33 @@ class MsSqlMergeJob(SqlMergeFollowupJob):
         return SqlMergeFollowupJob._new_temp_table_name("#" + table_name, op, sql_client)
 
 
-class MssqlParquetCopyJob(AdbcParquetCopyJob):
-    _config: MsSqlClientConfiguration
-    # mssql ADBC driver buffers the full input stream in memory; flush per row-group
-    # to bound peak memory and avoid OOM on large parquet files
-    _ingest_per_rowgroup: bool = True
+class MssqlParquetCopyJob(RunnableLoadJob, HasFollowupJobs):
+    """Appends a parquet file to its table with mssql-python's Arrow bulk copy"""
 
-    if TYPE_CHECKING:
-        from adbc_driver_manager.dbapi import Connection
+    def run(self) -> None:
+        from dlt.common.libs.pyarrow import pyarrow
 
-    def _connect(self) -> "Connection":
-        from adbc_driver_manager import dbapi
-
-        self._config = self._job_client.config  # type: ignore[assignment]
-        conn_dsn = self.odbc_to_go_mssql_dsn(self._config.credentials.get_odbc_dsn_dict())
-        conn_str = build_odbc_dsn(conn_dsn)
-        return dbapi.connect(driver="mssql", db_kwargs={"uri": conn_str})
-
-    @staticmethod
-    def odbc_to_go_mssql_dsn(dsn: Dict[str, Any]) -> Dict[str, Any]:
-        """Converts odbc connection string to go connection string used by ADBC"""
-        # DSN keys are already normalized to upper case
-        result: Dict[str, Any] = {}
-
-        for upper, value in dsn.items():
-            if value is None:
-                continue
-
-            v = str(value)
-
-            if upper == "ENCRYPT":
-                v = v.strip().lower()
-
-                # ODBC: yes/mandatory/true/1 → go-mssqldb: true (TLS on)
-                if v in {"yes", "true", "1", "mandatory"}:
-                    v = "true"
-
-                # ODBC: strict → go-mssqldb strict (if supported by the driver)
-                elif v in {"strict"}:
-                    v = "strict"
-
-                # ODBC: optional → go-mssqldb optional (login only)
-                elif v in {"optional"}:
-                    v = "optional"
-
-                # ODBC: no/false/0/disabled → go-mssqldb disable (no TLS at all)
-                # This mirrors your previous string hack:
-                #   .replace("=yes", "=1").replace("=no", "=disable")
-                elif v in {"no", "false", "0", "disabled", "disable"}:
-                    v = "disable"
-
-            elif upper == "TRUSTSERVERCERTIFICATE":
-                v = v.strip().lower()
-
-                # ODBC uses yes/no; go-mssqldb expects true/false (but is lenient);
-                # we normalize explicitly.
-                if v in {"yes", "true", "1"}:
-                    v = "true"
-                elif v in {"no", "false", "0"}:
-                    v = "false"
-
-            result[upper] = v
-
-        return result
+        sql_client: PyOdbcMsSqlClient = self._job_client.sql_client  # type: ignore[attr-defined]
+        casefold = sql_client.capabilities.casefold_identifier
+        with pyarrow.parquet.ParquetFile(self._file_path) as parquet_file:
+            expected_rows = parquet_file.metadata.num_rows
+            schema = parquet_file.schema_arrow
+            # stream record batches so memory stays bounded by one batch
+            reader = pyarrow.RecordBatchReader.from_batches(schema, parquet_file.iter_batches())
+            t_ = time.monotonic()
+            rows = sql_client.bulk_copy_arrow(
+                self.load_table_name, reader, [casefold(name) for name in schema.names]
+            )
+        if rows != expected_rows:
+            raise LoadJobTerminalException(
+                self._file_path,
+                f"Bulk copy wrote {rows} rows to {self.load_table_name}, the file has"
+                f" {expected_rows}",
+            )
+        logger.info(
+            f"{rows} rows copied from {self._file_name} to {self.load_table_name} in"
+            f" {time.monotonic() - t_} s"
+        )
 
 
 class MsSqlJobClient(InsertValuesJobClient):

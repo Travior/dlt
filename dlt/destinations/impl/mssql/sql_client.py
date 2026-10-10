@@ -32,6 +32,9 @@ UNDEFINED_RELATION_ERROR = _driver_error("42S02")
 SYNTAX_OR_ACCESS_ERROR = _driver_error("42000")
 WRONG_PARAMETER_COUNT_ERROR = _driver_error("07002")
 
+BULK_COPY_UNSUPPORTED_AUTHENTICATION = ("activedirectorypassword", "activedirectoryintegrated")
+"""Authentication methods mssql-python's bulk copy cannot sign in with"""
+
 
 class PyOdbcMsSqlClient(SqlClientBase[mssql_python.Connection], DBTransaction):
     dbapi: ClassVar[DBApi] = mssql_python
@@ -93,6 +96,45 @@ class PyOdbcMsSqlClient(SqlClientBase[mssql_python.Connection], DBTransaction):
     @property
     def native_connection(self) -> mssql_python.Connection:
         return self._conn
+
+    @raise_database_error
+    def bulk_copy_arrow(self, table_name: str, source: Any, columns: Sequence[str]) -> int:
+        """Bulk copies an Arrow stream into `table_name` and returns the number of rows copied.
+
+        The rows are copied in a single batch over a separate native connection, outside any
+        open transaction, so a failure commits nothing. Source columns map to `columns` by
+        position.
+        """
+        authentication = next(
+            (
+                str(v).lower()
+                for k, v in (self.credentials.query or {}).items()
+                if k.lower() == "authentication"
+            ),
+            "",
+        )
+        if authentication in BULK_COPY_UNSUPPORTED_AUTHENTICATION:
+            raise ValueError(
+                f"Bulk copy cannot sign in with `Authentication={authentication}`. Load with"
+                " `loader_file_format='insert_values'` or use another authentication method."
+            )
+        qualified_name = ".".join(
+            "[" + name.replace("]", "]]") + "]"
+            for name in (
+                self.capabilities.casefold_identifier(self.dataset_name),
+                self.capabilities.casefold_identifier(table_name),
+            )
+        )
+        with self._conn.cursor() as cursor:
+            result = cursor.bulkcopy_arrow(
+                qualified_name,
+                source,
+                batch_size=0,
+                timeout=0,
+                column_mappings=list(columns),
+                keep_nulls=True,
+            )
+        return int(result["rows_copied"])
 
     def drop_dataset(self) -> None:
         # MS Sql doesn't support DROP ... CASCADE, drop tables in the schema first
